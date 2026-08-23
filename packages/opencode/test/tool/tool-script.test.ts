@@ -330,6 +330,17 @@ return results.map((r, i) => \`RESULT \${i + 1}\\n\${r.output}\`).join("\\n---\\
     expect(result.output).toContain("</parameter> ###")
   })
 
+  test("strips a leaked opening angle bracket before a variable declaration", async () => {
+    const result = await runToolScript(
+      `<const r = { output: "found data-quality-platform" };
+return r.output;`,
+      [],
+    )
+
+    expect(result.metadata.status).toBe("completed")
+    expect(result.output).toContain("found data-quality-platform")
+  })
+
   test("pre-aborted signal cancels the execution", async () => {
     // A sync spin blocks the host event loop, so a timer-armed abort can never
     // fire mid-spin (the 60s active budget covers that in production). An

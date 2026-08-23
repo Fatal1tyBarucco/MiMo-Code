@@ -106,6 +106,7 @@ function execCommandArgs(args: unknown) {
 function normalizeExecCode(code: string) {
   return code
     .replace(/^(\s*)<(?:parameter|paramter)(?:(?:\s+name\s*=|\s*=)\s*["']?code["']?)?\s*>\s*/i, "$1")
+    .replace(/^(\s*)<(?=(?:const|let|var)\b)/, "$1")
     .replace(/(?:\s*<\/(?:parameter|paramter)>)+\s*(?:#{1,6}\s*)?$/i, "")
 }
 
