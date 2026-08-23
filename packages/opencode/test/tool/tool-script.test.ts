@@ -308,11 +308,19 @@ describe("exec", () => {
   test("strips leaked parameter wrappers from custom exec source", async () => {
     const wrapped = await runToolScript(`<parameter name="code">\nreturn { repaired: true }\n</parameter> ###`, [])
     const trailing = await runToolScript(`return "trailing repaired"</paramter>`, [])
+    const repeated = await runToolScript(
+      `const results = [{ output: "first" }, { output: "second" }];
+return results.map((r, i) => \`RESULT \${i + 1}\\n\${r.output}\`).join("\\n---\\n");
+</parameter></parameter>`,
+      [],
+    )
 
     expect(wrapped.metadata.status).toBe("completed")
     expect(wrapped.output).toContain('"repaired": true')
     expect(trailing.metadata.status).toBe("completed")
     expect(trailing.output).toContain("trailing repaired")
+    expect(repeated.metadata.status).toBe("completed")
+    expect(repeated.output).toContain("RESULT 2\nsecond")
   })
 
   test("does not strip parameter-like text inside JavaScript strings", async () => {

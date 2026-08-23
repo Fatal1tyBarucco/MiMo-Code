@@ -106,7 +106,7 @@ function execCommandArgs(args: unknown) {
 function normalizeExecCode(code: string) {
   return code
     .replace(/^(\s*)<(?:parameter|paramter)(?:(?:\s+name\s*=|\s*=)\s*["']?code["']?)?\s*>\s*/i, "$1")
-    .replace(/\s*<\/(?:parameter|paramter)>\s*(?:#{1,6}\s*)?$/i, "")
+    .replace(/(?:\s*<\/(?:parameter|paramter)>)+\s*(?:#{1,6}\s*)?$/i, "")
 }
 
 /** JSON Schema (zod v4 toJSONSchema output) → compact TS type text. Best-effort:
