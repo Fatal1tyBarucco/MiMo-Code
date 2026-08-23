@@ -305,6 +305,23 @@ describe("exec", () => {
     expect(result.metadata.status).toBe("code_error")
   })
 
+  test("strips leaked parameter wrappers from custom exec source", async () => {
+    const wrapped = await runToolScript(`<parameter name="code">\nreturn { repaired: true }\n</parameter> ###`, [])
+    const trailing = await runToolScript(`return "trailing repaired"</paramter>`, [])
+
+    expect(wrapped.metadata.status).toBe("completed")
+    expect(wrapped.output).toContain('"repaired": true')
+    expect(trailing.metadata.status).toBe("completed")
+    expect(trailing.output).toContain("trailing repaired")
+  })
+
+  test("does not strip parameter-like text inside JavaScript strings", async () => {
+    const result = await runToolScript(`return "</parameter> ###"`, [])
+
+    expect(result.metadata.status).toBe("completed")
+    expect(result.output).toContain("</parameter> ###")
+  })
+
   test("pre-aborted signal cancels the execution", async () => {
     // A sync spin blocks the host event loop, so a timer-armed abort can never
     // fire mid-spin (the 60s active budget covers that in production). An
@@ -394,6 +411,33 @@ describe("exec", () => {
 
     expect(result.metadata.status).toBe("completed")
     expect(result.output).toContain('"output": "10000:10000"')
+  })
+
+  test("exec_command repairs unambiguous parameter spelling mistakes", async () => {
+    const seen: Array<{ workdir?: string; timeout: number }> = []
+    const parameters = z.object({
+      command: z.string(),
+      timeout: z.number(),
+      max_output_tokens: z.number(),
+      workdir: z.string().optional(),
+      description: z.string(),
+    })
+    const bash: Tool.Def<typeof parameters> = {
+      id: "bash",
+      description: "fake bash",
+      parameters,
+      execute: (args) => {
+        seen.push({ workdir: args.workdir, timeout: args.timeout })
+        return Effect.succeed({ title: args.description, output: "ok", metadata: {} })
+      },
+    }
+    const result = await runToolScript(
+      `return await tools.exec_command({ cmd: "pwd", workdiir: "/tmp", yieldTimeMs: 1234 })`,
+      [bash],
+    )
+
+    expect(result.metadata.status).toBe("completed")
+    expect(seen).toEqual([{ workdir: "/tmp", timeout: 1234 }])
   })
 
   test("lists exec_command instead of bash in the code-mode catalog", async () => {

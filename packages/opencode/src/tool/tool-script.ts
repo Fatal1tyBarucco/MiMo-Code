@@ -57,8 +57,43 @@ const ExecCommandParameters = z.object({
 const EXEC_COMMAND_DESCRIPTION =
   "Runs a shell command through the permission-gated bash executor. `yield_time_ms` and `max_output_tokens` default to 10000. Output exceeding the token budget is saved to tool storage."
 
+function levenshtein(a: string, b: string): number {
+  const distances = Array.from({ length: a.length + 1 }, (_, index) =>
+    Array.from({ length: b.length + 1 }, (__, inner) => (index === 0 ? inner : inner === 0 ? index : 0)),
+  )
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      distances[i][j] = Math.min(
+        distances[i - 1][j] + 1,
+        distances[i][j - 1] + 1,
+        distances[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      )
+    }
+  }
+  return distances[a.length][b.length]
+}
+
 function execCommandArgs(args: unknown) {
-  const input = ExecCommandParameters.parse(args)
+  const keys = ["cmd", "yield_time_ms", "max_output_tokens", "workdir"]
+  const repaired =
+    args && typeof args === "object" && !Array.isArray(args)
+      ? Object.fromEntries(
+          Object.entries(args).map(([key, value]) => {
+            if (keys.includes(key)) return [key, value]
+            const canonical = keys.filter((candidate) => ToolCompat.canonical(key) === ToolCompat.canonical(candidate))
+            const matches = canonical.length
+              ? canonical
+              : keys.filter(
+                  (candidate) =>
+                    ToolCompat.canonical(candidate).length >= 5 &&
+                    levenshtein(ToolCompat.canonical(key), ToolCompat.canonical(candidate)) === 1,
+                )
+            if (matches.length !== 1 || matches[0] in args) return [key, value]
+            return [matches[0], value]
+          }),
+        )
+      : args
+  const input = ExecCommandParameters.parse(repaired)
   return {
     command: input.cmd,
     timeout: input.yield_time_ms ?? EXEC_COMMAND_DEFAULT_YIELD_TIME_MS,
@@ -66,6 +101,12 @@ function execCommandArgs(args: unknown) {
     workdir: input.workdir,
     description: input.cmd.length > 80 ? `${input.cmd.slice(0, 77)}...` : input.cmd,
   }
+}
+
+function normalizeExecCode(code: string) {
+  return code
+    .replace(/^(\s*)<(?:parameter|paramter)(?:(?:\s+name\s*=|\s*=)\s*["']?code["']?)?\s*>\s*/i, "$1")
+    .replace(/\s*<\/(?:parameter|paramter)>\s*(?:#{1,6}\s*)?$/i, "")
 }
 
 /** JSON Schema (zod v4 toJSONSchema output) → compact TS type text. Best-effort:
@@ -376,6 +417,7 @@ export const ToolScriptTool = Tool.define(
       }),
       execute: (params: { code: string; max_tool_calls?: number; timeout?: number }, ctx: Tool.Context) =>
         Effect.gen(function* () {
+          const code = normalizeExecCode(params.code)
           const maxToolCalls = params.max_tool_calls ?? MAX_TOOL_CALLS_DEFAULT
           const activeDeadlineMs = params.timeout ?? ACTIVE_DEADLINE_MS_DEFAULT
           const trace: TraceEntry[] = []
@@ -402,7 +444,7 @@ export const ToolScriptTool = Tool.define(
               durationMs: t.durationMs,
               ...(t.error && { error: t.error.slice(0, 200) }),
             }))
-          if (Buffer.byteLength(params.code, "utf8") > MAX_CODE_BYTES) {
+          if (Buffer.byteLength(code, "utf8") > MAX_CODE_BYTES) {
             return {
               title: "code too large",
               metadata: { status: "code_error", toolCalls: 0, counts: tally(), recent: recentTail() },
@@ -472,7 +514,7 @@ export const ToolScriptTool = Tool.define(
           // runtimes expose Transpiler without a constructible implementation.
           // Report line/column relative to the CALLER's code (the wrapper adds one
           // line above), plus source text — a bare parse error is undebuggable.
-          const source = `globalThis.__main = async () => {\n${params.code}\n}`
+          const source = `globalThis.__main = async () => {\n${code}\n}`
           const result = ts.transpileModule(source, {
             reportDiagnostics: true,
             compilerOptions: {
@@ -480,7 +522,7 @@ export const ToolScriptTool = Tool.define(
               target: ts.ScriptTarget.ESNext,
             },
           })
-          const hasImport = /^\s*(import|export)\s/m.test(params.code)
+          const hasImport = /^\s*(import|export)\s/m.test(code)
           const formatDiagnostics = (diagnostics: readonly ts.Diagnostic[]): string => {
             const rendered = diagnostics
               .map((diagnostic) => {
