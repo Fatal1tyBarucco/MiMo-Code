@@ -51,7 +51,7 @@ import type { TaskTool } from "@/tool/task"
 import type { QuestionTool } from "@/tool/question"
 import type { SkillTool } from "@/tool/skill"
 import type { WorkflowTool } from "@/tool/workflow"
-import type { ToolScriptTool } from "@/tool/tool-script"
+import { viewExecSubtools, type ExecSubPartSnapshot, type ToolScriptTool } from "@/tool/tool-script"
 import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "@tui/context/sdk"
 import { useCommandDialog } from "@tui/component/dialog-command"
@@ -2291,12 +2291,16 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
     get part() {
       return props.part
     },
+    message: props.message,
   }
 
   return (
     <Show when={!shouldHide()}>
       <Switch>
         <Match when={props.part.tool === "bash"}>
+          <Bash {...toolprops} />
+        </Match>
+        <Match when={props.part.tool === "exec_command"}>
           <Bash {...toolprops} />
         </Match>
         <Match when={props.part.tool === "glob"}>
@@ -2365,6 +2369,7 @@ type ToolProps<T> = {
   tool: string
   output?: string
   part: ToolPart
+  message: AssistantMessage
 }
 function PlanExit(props: ToolProps<any>) {
   const { theme } = useTheme()
@@ -2446,14 +2451,88 @@ function WorkItemTask(props: ToolProps<typeof TaskTool>) {
   )
 }
 
+function ExecSubtoolRow(props: {
+  part: ExecSubPartSnapshot
+  parent: ToolPart
+  message: AssistantMessage
+}) {
+  const synthetic = createMemo(() => {
+    const state = props.part.state
+    const input = state.input && typeof state.input === "object" && !Array.isArray(state.input)
+      ? state.input
+      : state.input === undefined ? {} : { value: state.input }
+    return {
+      id: props.part.callID as ToolPart["id"],
+      sessionID: props.parent.sessionID,
+      messageID: props.parent.messageID,
+      type: "tool" as const,
+      callID: props.part.callID,
+      tool: props.part.tool,
+      state: {
+        status: state.status,
+        input,
+        ...(state.status === "running" ? {
+          title: state.title,
+          ...(state.metadata ? { metadata: state.metadata } : {}),
+          time: state.time,
+        } : state.status === "completed" ? {
+          title: state.title ?? props.part.tool,
+          output: state.output ?? "",
+          metadata: state.metadata ?? {},
+          time: { start: state.time.start, end: state.time.end ?? state.time.start },
+          ...(state.attachments ? { attachments: state.attachments } : {}),
+          ...(state.providerOutput !== undefined ? { providerOutput: state.providerOutput } : {}),
+          ...(state.providerMetadata ? { providerMetadata: state.providerMetadata } : {}),
+        } : {
+          error: state.error ?? "Tool failed",
+          ...(state.metadata ? { metadata: state.metadata } : {}),
+          time: { start: state.time.start, end: state.time.end ?? state.time.start },
+          ...(state.attachments ? { attachments: state.attachments } : {}),
+        }),
+      },
+    } as ToolPart
+  })
+
+  return <ToolPart last={false} part={synthetic()} message={props.message} />
+}
+
+function ExecSubtoolGroup(props: {
+  parts: ExecSubPartSnapshot[]
+  parent: ToolPart
+  message: AssistantMessage
+  clearParentHover: () => void
+}) {
+  const { theme } = useTheme()
+  return (
+    <box
+      border={["left"]}
+      paddingLeft={2}
+      borderColor={theme.borderSubtle}
+      customBorderChars={SplitBorder.customBorderChars}
+      onMouseUp={(event: MouseEvent) => event.stopPropagation()}
+      onMouseOver={(event: MouseEvent) => {
+        event.stopPropagation()
+        props.clearParentHover()
+      }}
+      onMouseOut={(event: MouseEvent) => {
+        event.stopPropagation()
+        props.clearParentHover()
+      }}
+    >
+      <For each={props.parts}>
+        {(part) => <ExecSubtoolRow part={part} parent={props.parent} message={props.message} />}
+      </For>
+    </box>
+  )
+}
+
 // Renderer for the `exec` batch-orchestration tool. Collapsed view is a compact
-// BlockTool: summary title (spinner + live aggregated call counts published
-// through ctx.metadata) plus the last few sub-calls — one bordered clickable
-// unit, visible while running and kept after completion. Clicking swaps to the
-// full BlockTool with code, result, logs and trace. Before any sub-call lands
-// it stays a one-line InlineTool.
+// BlockTool with aggregate counts. Expanded view uses the pure nested-part view
+// so every admitted sub-call can be rendered as its own row; actor rows reuse
+// the direct actor navigation path whenever a target reference is available.
 function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
   const { theme } = useTheme()
+  const hoverControl = { clear: () => {} }
   const [expanded, setExpanded] = createSignal(false)
   const isRunning = createMemo(() => props.part.state.status === "running")
   const meta = createMemo(() =>
@@ -2493,10 +2572,7 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
           `  ${t.status === "error" ? "✗" : "✓"} ${t.name} [${t.durationMs}ms]${t.error ? ` ${t.error.slice(0, 80)}` : ""}`,
       ),
   )
-  // exec embeds nested tool output (a `bash` call's stdout) into <return_value>
-  // and <logs>, so escape sequences reach this renderer raw.
-  const output = createMemo(() => stripAnsi(props.output?.trim() ?? ""))
-
+  const subParts = createMemo(() => viewExecSubtools(meta()))
   return (
     <Show
       when={expanded()}
@@ -2506,7 +2582,7 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
         // unit. An InlineTool with a loose text underneath read as two
         // elements and the click target was easy to miss.
         <Show
-          when={recentLines().length > 0}
+          when={recentLines().length > 0 || subParts().length > 0}
           fallback={
             <InlineTool
               icon="»"
@@ -2532,14 +2608,16 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
         </Show>
       }
     >
-      <BlockTool title={`# exec · ${summary()}`} part={props.part} onClick={() => setExpanded(false)}>
+      <BlockTool
+        title={`# exec · ${summary()}`}
+        part={props.part}
+        onClick={() => setExpanded(false)}
+        hoverControl={hoverControl}
+      >
         <box gap={1}>
           <text fg={theme.textMuted}>{((props.input.code as string | undefined) ?? "").trim()}</text>
-          <Show when={recentLines().length > 0}>
-            <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
-          </Show>
-          <Show when={output()}>
-            <text fg={failed() ? theme.error : theme.text}>{output()}</text>
+          <Show when={subParts().length > 0}>
+            <ExecSubtoolGroup parts={subParts()} parent={props.part} message={props.message} clearParentHover={hoverControl.clear} />
           </Show>
           <text fg={theme.textMuted}>Click to collapse</text>
         </box>
@@ -3069,10 +3147,12 @@ function BlockTool(props: {
   onClick?: () => void
   part?: ToolPart
   spinner?: boolean
+  hoverControl?: { clear: () => void }
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
+  if (props.hoverControl) props.hoverControl.clear = () => setHover(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
   return (
     <box
@@ -3155,9 +3235,9 @@ function Bash(props: ToolProps<typeof BashTool>) {
   const title = createMemo(() => {
     const desc = props.input.description ?? "Shell"
     const wd = workdirDisplay()
-    if (!wd) return `# ${desc}`
-    if (desc.includes(wd)) return `# ${desc}`
-    return `# ${desc} in ${wd}`
+    const prefix = props.tool === "exec_command" ? "# exec_command" : `# ${desc}`
+    if (!wd || (props.tool !== "exec_command" && desc.includes(wd))) return prefix
+    return `${prefix} in ${wd}`
   })
 
   return (
