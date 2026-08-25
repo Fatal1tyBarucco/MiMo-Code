@@ -61,28 +61,41 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
     ),
   )
 
-  it.live("keeps non-Responses MiMo on the default toolset even with the Codex harness", () =>
+  it.live("uses the harness rather than MiMo API transport to select the toolset", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const reg = yield* ToolRegistry.Service
         const agents = yield* Agent.Service
         const build = yield* agents.get("build")
-        const normal = yield* reg.tools({
+        const normalDefault = yield* reg.tools({
+          providerID: ProviderID.make("xiaomi"),
+          modelID: ModelID.make("mimo-v2.6"),
+          agent: build,
+        })
+        const responsesDefault = yield* reg.tools({
+          providerID: ProviderID.make("xiaomi"),
+          modelID: ModelID.make("mimo-v2.6-ptc"),
+          agent: build,
+        })
+        const normalCodex = yield* reg.tools({
           providerID: ProviderID.make("xiaomi"),
           modelID: ModelID.make("mimo-v2.6"),
           agent: build,
           harness: "codex",
         })
-        const responses = yield* reg.tools({
+        const responsesCodex = yield* reg.tools({
           providerID: ProviderID.make("xiaomi"),
           modelID: ModelID.make("mimo-v2.6-ptc"),
           agent: build,
           harness: "codex",
         })
 
-        expect(normal.map((tool) => tool.id)).toContain("bash")
-        expect(normal.map((tool) => tool.id)).not.toContain("exec")
-        expect(responses.map((tool) => tool.id)).toEqual(["exec"])
+        expect(normalDefault.map((tool) => tool.id)).toContain("bash")
+        expect(normalDefault.map((tool) => tool.id)).not.toContain("exec")
+        expect(responsesDefault.map((tool) => tool.id)).toContain("bash")
+        expect(responsesDefault.map((tool) => tool.id)).not.toContain("exec")
+        expect(normalCodex.map((tool) => tool.id)).toEqual(["exec"])
+        expect(responsesCodex.map((tool) => tool.id)).toEqual(["exec"])
       }),
     ),
   )
