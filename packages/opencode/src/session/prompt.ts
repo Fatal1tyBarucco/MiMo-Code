@@ -1291,7 +1291,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return new Set(actor.tools)
       })
       const whitelist = yield* whitelistFor()
-      const useGPTTools = usesGPTToolset(input.model.id, input.harness)
+      const useGPTTools = usesGPTToolset(input.model.id, input.harness, input.model.api.id, input.model.family)
       const execAllowedByWhitelist =
         useGPTTools &&
         !!whitelist &&
@@ -1395,6 +1395,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // facing schema allowlist and stays compact in Codex mode.
       for (const item of yield* registry.registered({
         modelID: input.model.id,
+        apiModelID: input.model.api.id,
+        family: input.model.family,
         providerID: input.model.providerID,
         agent: input.agent,
         harness: input.harness,

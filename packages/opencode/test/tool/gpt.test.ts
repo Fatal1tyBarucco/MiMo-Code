@@ -32,19 +32,27 @@ describe("isMcpToolSearchEnabled", () => {
     expect(isMcpToolSearchEnabled(false, undefined, "claude-opus-4-6")).toBe(false)
     expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.5")).toBe(false)
     expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.5-pro")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6")).toBe(true)
+    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.5-pro-ultraspeed")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2-pro")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, undefined, "mimo-ptc-test")).toBe(true)
+    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6-ptc")).toBe(true)
     expect(isMcpToolSearchEnabled(false, undefined, "gpt-5.2")).toBe(true)
     expect(isMcpToolSearchEnabled(false, undefined, "gpt-oss-120b")).toBe(false)
     expect(isMcpToolSearchEnabled(true, undefined, "claude-opus-4-6")).toBe(true)
   })
 
-  test("is enabled for non-GPT models in Codex mode", () => {
+  test("keeps non-Responses MiMo in default mode when process Codex mode is enabled", () => {
     process.env.MIMOCODE_CODEX_MODE = "true"
     expect(isMcpToolSearchEnabled(false, undefined, "claude-opus-4-6")).toBe(true)
+    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6-ptc")).toBe(true)
   })
 
   test("allows the resolved session mode to override the process mode", () => {
     expect(isMcpToolSearchEnabled(false, "codex", "claude-opus-4-6")).toBe(true)
+    expect(isMcpToolSearchEnabled(false, "codex", "mimo-v2.6")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, "codex", "mimo-v2.6-ptc")).toBe(true)
     expect(isMcpToolSearchEnabled(false, "auto", "gpt-5.2")).toBe(true)
     expect(isMcpToolSearchEnabled(false, "auto", "claude-opus-4-6")).toBe(false)
     process.env.MIMOCODE_CODEX_MODE = "true"
@@ -57,13 +65,17 @@ describe("isMcpToolSearchEnabled", () => {
 })
 
 describe("usesGPTToolset", () => {
-  test("uses the normal toolset for MiMo v2.5 models", () => {
+  test("uses the normal toolset for versioned MiMo models and the GPT toolset for Responses PTC", () => {
     expect(usesGPTToolset("mimo-v2.5")).toBe(false)
     expect(usesGPTToolset("mimo-v2.5-pro")).toBe(false)
-    expect(usesGPTToolset("mimo-v2.6")).toBe(true)
+    expect(usesGPTToolset("mimo-v2.5-pro-ultraspeed")).toBe(false)
+    expect(usesGPTToolset("mimo-v2-pro")).toBe(false)
+    expect(usesGPTToolset("mimo-v2.6")).toBe(false)
+    expect(usesGPTToolset("mimo-ptc-test")).toBe(true)
+    expect(usesGPTToolset("mimo-v2.6-ptc")).toBe(true)
   })
 
-  test("uses the GPT toolset for every model in Codex mode", () => {
+  test("uses the GPT toolset for non-MiMo models in process Codex mode", () => {
     expect(usesGPTToolset("claude-opus-4-6")).toBe(false)
     process.env.MIMOCODE_CODEX_MODE = "true"
     expect(usesGPTToolset("claude-opus-4-6")).toBe(true)
@@ -71,11 +83,16 @@ describe("usesGPTToolset", () => {
 
   test("allows the resolved session mode to override the process mode", () => {
     expect(usesGPTToolset("claude-opus-4-6", "codex")).toBe(true)
+    expect(usesGPTToolset("mimo-v2.6", "codex")).toBe(false)
+    expect(usesGPTToolset("mimo-v2.6-ptc", "codex")).toBe(true)
+    expect(usesGPTToolset("deployment-primary", "codex", "mimo-v2.6", "mimo")).toBe(false)
+    expect(usesGPTToolset("deployment-primary", "codex", "mimo-v2.6-ptc", "mimo")).toBe(true)
     expect(usesGPTToolset("gpt-5.2", "auto")).toBe(true)
-    expect(usesGPTToolset("mimo-v2.6", "auto")).toBe(true)
+    expect(usesGPTToolset("mimo-v2.6-ptc", "auto")).toBe(true)
     expect(usesGPTToolset("claude-opus-4-6", "auto")).toBe(false)
     process.env.MIMOCODE_CODEX_MODE = "true"
     expect(usesGPTToolset("claude-opus-4-6", "auto")).toBe(true)
+    expect(usesGPTToolset("mimo-v2.6", "auto")).toBe(false)
     expect(usesGPTToolset("claude-opus-4-6", "default")).toBe(false)
     expect(usesGPTToolset("mimo-v2.6", "default")).toBe(false)
     expect(usesGPTToolset("gpt-5.2", "default")).toBe(true)
