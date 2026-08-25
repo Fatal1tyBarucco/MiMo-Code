@@ -245,10 +245,11 @@ const elog = EffectLogger.create({ service: "session.prompt" })
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts>
-  readonly recovery: (input: { sessionID: SessionID; agentID?: string }) => Effect.Effect<RecoveryCandidate[]>
-  readonly resume: (input: ResumeTurnInput) => Effect.Effect<MessageV2.WithParts, InstanceType<typeof NotFoundError>>
+  readonly recovery: (input: { sessionID: SessionID; agentID?: string; allowBusy?: boolean }) => Effect.Effect<RecoveryCandidate[]>
+  readonly resume: (input: ResumeTurnInput) => Effect.Effect<MessageV2.WithParts, InstanceType<typeof NotFoundError> | Session.BusyError>
+  readonly resumeBackground: (input: ResumeTurnInput) => Effect.Effect<void, InstanceType<typeof NotFoundError> | Session.BusyError>
   readonly loop: (input: z.infer<typeof LoopInput>) => Effect.Effect<MessageV2.WithParts>
-  readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts>
+  readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
   readonly sweepOrphanAssistants: (sessionID: SessionID, immediate?: boolean) => Effect.Effect<void>
@@ -2762,8 +2763,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       throw new Error("Impossible")
     })
 
-    const recovery = Effect.fn("SessionPrompt.recovery")(function* (input: { sessionID: SessionID; agentID?: string }) {
-      if ((yield* status.get(input.sessionID)).type !== "idle") return []
+    const recovery = Effect.fn("SessionPrompt.recovery")(function* (input: { sessionID: SessionID; agentID?: string; allowBusy?: boolean }) {
+      if (!input.allowBusy && (yield* status.get(input.sessionID)).type !== "idle") return []
       const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
       const candidates: RecoveryCandidate[] = []
       for (const [index, msg] of msgs.entries()) {
@@ -4172,7 +4173,8 @@ If this task is a simple fix, Q&A, or read-only operation, you can skip this not
                 Effect.provideService(ToolRegistry.Service, registry),
               )
             lastSystemPrompt = prebuiltSystem
-            const maxModeCfg = (yield* config.get()).experimental?.maxMode
+            const cfg = yield* config.get()
+            const maxModeCfg = cfg.experimental?.maxMode
             const useMaxMode =
               agent.name === MaxMode.MAX_MODE_AGENT && maxModeCfg !== undefined && format.type !== "json_schema"
 
@@ -4242,9 +4244,23 @@ If this task is a simple fix, Q&A, or read-only operation, you can skip this not
                   handle,
                   llm,
                   candidates: maxModeCfg?.candidates,
-                  setStatus: (message) =>
-                    status.set(sessionID, message ? { type: "busy", message } : { type: "busy" }),
-                })
+                  retryConfig: cfg,
+                 setStatus: (message) =>
+                   status.set(sessionID, message ? { type: "busy", message } : { type: "busy" }),
+                  onRetry: (info) =>
+                    bus.publish(Session.Event.RetryAttempt, {
+                      sessionID,
+                      messageID: handle.message.id,
+                      attempt: info.attempt,
+                      phaseAttempt: info.attempt,
+                      maxAttempts: info.maxAttempts,
+                      phase: info.phase,
+                      kind: info.kind,
+                      scope: info.scope,
+                      reason: info.message,
+                      nextDelayMs: info.nextDelayMs,
+                    }),
+               })
               : handle.process(processArgs)
 
             const result = yield* stepEffect.pipe(
@@ -4551,7 +4567,7 @@ If this task is a simple fix, Q&A, or read-only operation, you can skip this not
       )
     })
 
-    const shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.shell")(
+    const shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError> = Effect.fn("SessionPrompt.shell")(
       function* (input: ShellInput) {
         return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), shellImpl(input))
       },
@@ -4863,7 +4879,7 @@ If this task is a simple fix, Q&A, or read-only operation, you can skip this not
     })
 
     const resume = Effect.fn("SessionPrompt.resume")(function* (input: ResumeTurnInput) {
-      yield* state.assertNotBusy(input.sessionID)
+      yield* state.assertNotBusy(input.sessionID, input.agentID)
       const candidates = yield* recovery({ sessionID: input.sessionID, agentID: input.agentID })
       const candidate = candidates.find((item) => item.assistantMessageID === input.assistantMessageID)
       if (candidate === undefined) {
@@ -4894,11 +4910,44 @@ If this task is a simple fix, Q&A, or read-only operation, you can skip this not
       )
     })
 
+    const resumeBackground = Effect.fn("SessionPrompt.resumeBackground")(function* (input: ResumeTurnInput) {
+      const candidates = yield* recovery({ sessionID: input.sessionID, agentID: input.agentID, allowBusy: true })
+      const candidate = candidates.find((item) => item.assistantMessageID === input.assistantMessageID)
+      if (candidate === undefined) {
+        return yield* Effect.fail(
+          new NotFoundError({
+            message: "No resumable interrupted turn found for assistant message " + input.assistantMessageID,
+          }),
+        )
+      }
+      const agentID = input.agentID ?? "main"
+      yield* state.start(
+        input.sessionID,
+        agentID,
+        lastAssistant(input.sessionID, agentID),
+        runLoop(input.sessionID, agentID, input.task_id).pipe(
+          Effect.ensuring(
+            abandonRecoveredAssistant({ sessionID: input.sessionID, assistantMessageID: input.assistantMessageID, agentID }).pipe(
+              Effect.catchCause((cause) =>
+                elog.warn("recovered-assistant-abandon-failed", {
+                  sessionID: input.sessionID,
+                  messageID: input.assistantMessageID,
+                  cause,
+                }),
+              ),
+            ),
+          ),
+        ),
+      )
+      return
+    })
+
     const impl = Service.of({
       cancel,
       prompt,
       recovery,
       resume,
+      resumeBackground,
       loop,
       shell,
       command,
