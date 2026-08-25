@@ -123,12 +123,16 @@ export interface Interface {
   readonly tools: (model: {
     providerID: ProviderID
     modelID: ModelID
+    apiModelID?: string
+    family?: string
     agent: Agent.Info
     harness?: HarnessMode
   }) => Effect.Effect<Tool.Def[]>
   readonly registered: (model: {
     providerID: ProviderID
     modelID: ModelID
+    apiModelID?: string
+    family?: string
     agent: Agent.Info
     harness?: HarnessMode
   }) => Effect.Effect<Tool.Def[]>
@@ -364,10 +368,12 @@ export const layer = Layer.effect(
     const available = Effect.fn("ToolRegistry.available")(function* (input: {
       providerID: ProviderID
       modelID: ModelID
+      apiModelID?: string
+      family?: string
       agent: Agent.Info
       harness?: HarnessMode
     }) {
-      const useGPTTools = usesGPTToolset(input.modelID, input.harness)
+      const useGPTTools = usesGPTToolset(input.modelID, input.harness, input.apiModelID, input.family)
       let filtered = (yield* all()).filter((tool) => {
         if (tool.id === ToolScriptTool.id) return useGPTTools || Flag.MIMOCODE_ENABLE_EXEC_TOOL
         if (tool.id === CodeSearchTool.id || tool.id === WebSearchTool.id) {
@@ -446,7 +452,14 @@ export const layer = Layer.effect(
       input ? available(input).pipe(Effect.map((result) => result.filtered)) : all()
 
     const definitions = Effect.fn("ToolRegistry.definitions")(function* (
-      input: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info; harness?: HarnessMode },
+      input: {
+        providerID: ProviderID
+        modelID: ModelID
+        apiModelID?: string
+        family?: string
+        agent: Agent.Info
+        harness?: HarnessMode
+      },
       includeHidden: boolean,
     ) {
       const availableTools = yield* available(input)

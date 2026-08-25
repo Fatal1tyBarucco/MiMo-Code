@@ -23,7 +23,7 @@ import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { Flag } from "@/flag/flag"
-import { type HarnessMode, isGPTModel, usesMimoCodexMode } from "@/tool/gpt"
+import { type HarnessMode, isGPTModel, usesMimoDefaultMode, usesMimoResponsesApi } from "@/tool/gpt"
 
 function renderGitResult(result: Git.Result, fallback = "(none)") {
   if (result.exitCode !== 0) return fallback
@@ -33,10 +33,11 @@ function renderGitResult(result: Git.Result, fallback = "(none)") {
 const anthropicEnvironment = new Map<string, string>()
 
 export function provider(model: Provider.Model, harness?: HarnessMode) {
+  if (usesMimoDefaultMode(model.id, model.api.id, model.family)) return [PROMPT_DEFAULT]
   if (harness === "codex" || ((harness === undefined || harness === "auto") && Flag.MIMOCODE_CODEX_MODE)) return [PROMPT_GPT]
   const prompt = (id: string) => {
     if (isGPTModel(id)) return PROMPT_GPT
-    if (usesMimoCodexMode(id)) return harness === "default" ? PROMPT_DEFAULT : PROMPT_GPT
+    if (usesMimoResponsesApi(id)) return harness === "default" ? PROMPT_DEFAULT : PROMPT_GPT
     if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return PROMPT_BEAST
     if (id.includes("gemini-")) return PROMPT_GEMINI
     if (id.includes("claude")) return PROMPT_ANTHROPIC

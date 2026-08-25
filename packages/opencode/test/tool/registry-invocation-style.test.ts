@@ -62,6 +62,32 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
     ),
   )
 
+  it.live("keeps non-Responses MiMo on the default toolset even with the Codex harness", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const reg = yield* ToolRegistry.Service
+        const agents = yield* Agent.Service
+        const build = yield* agents.get("build")
+        const normal = yield* reg.tools({
+          providerID: ProviderID.make("xiaomi"),
+          modelID: ModelID.make("mimo-v2.6"),
+          agent: build,
+          harness: "codex",
+        })
+        const responses = yield* reg.tools({
+          providerID: ProviderID.make("xiaomi"),
+          modelID: ModelID.make("mimo-v2.6-ptc"),
+          agent: build,
+          harness: "codex",
+        })
+
+        expect(normal.map((tool) => tool.id)).toContain("bash")
+        expect(normal.map((tool) => tool.id)).not.toContain("exec")
+        expect(responses.map((tool) => tool.id)).toEqual(["exec"])
+      }),
+    ),
+  )
+
   it.live.skip("exposes exec by default only to GPT models", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

@@ -594,7 +594,9 @@ export const ToolScriptTool = Tool.define(
           const getDefs = toolScriptRegistry.current
           if (!getDefs) throw new Error("exec tool registry unavailable")
           const agentInfo = yield* agents.get(ctx.agent)
-          const model = ctx.extra?.model as { id: ModelID; providerID: ProviderID } | undefined
+          const model = ctx.extra?.model as
+            | { id: ModelID; providerID: ProviderID; api?: { id: string }; family?: string }
+            | undefined
           const harness = ctx.extra?.harness as HarnessMode | undefined
           const whitelist = Array.isArray(ctx.extra?.toolWhitelist)
             ? new Set(ctx.extra.toolWhitelist.filter((id): id is string => typeof id === "string"))
@@ -602,7 +604,14 @@ export const ToolScriptTool = Tool.define(
           const defs = (
             yield* getDefs(
               model
-                ? { providerID: model.providerID, modelID: model.id, agent: agentInfo, harness }
+                ? {
+                    providerID: model.providerID,
+                    modelID: model.id,
+                    apiModelID: model.api?.id,
+                    family: model.family,
+                    agent: agentInfo,
+                    harness,
+                  }
                 : undefined,
             )
           ).filter((def) => !TOOL_SCRIPT_EXCLUDED.has(def.id) && (!whitelist || whitelist.has(def.id)))
