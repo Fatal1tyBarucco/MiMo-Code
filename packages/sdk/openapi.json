@@ -2289,6 +2289,64 @@
         ]
       }
     },
+    "/experimental/worktree/auto": {
+      "post": {
+        "operationId": "worktree.auto",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "directory",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspace",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "summary": "Auto-create worktree on conflict",
+        "description": "Check for conflicts and auto-create a worktree if needed.",
+        "responses": {
+          "200": {
+            "description": "Worktree info or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Worktree"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@mimo-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.worktree.auto({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/experimental/session": {
       "get": {
         "operationId": "experimental.session.list",
@@ -11248,6 +11306,29 @@
         },
         "required": ["type", "properties"]
       },
+      "Event.session.cwd": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "session.cwd"
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses.*"
+              },
+              "cwd": {
+                "type": "string"
+              }
+            },
+            "required": ["sessionID", "cwd"]
+          }
+        },
+        "required": ["type", "properties"]
+      },
       "Event.bash.interactive.asked": {
         "type": "object",
         "properties": {
@@ -14074,6 +14155,9 @@
               },
               {
                 "$ref": "#/components/schemas/Event.question.rejected"
+              },
+              {
+                "$ref": "#/components/schemas/Event.session.cwd"
               },
               {
                 "$ref": "#/components/schemas/Event.bash.interactive.asked"
@@ -17615,6 +17699,9 @@
           },
           {
             "$ref": "#/components/schemas/Event.question.rejected"
+          },
+          {
+            "$ref": "#/components/schemas/Event.session.cwd"
           },
           {
             "$ref": "#/components/schemas/Event.bash.interactive.asked"
