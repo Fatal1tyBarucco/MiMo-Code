@@ -63,14 +63,14 @@ describe("session.system", () => {
     expect(prompt).not.toContain("gitStatus:")
   })
 
-  test("non-Responses MiMo forces the default prompt even with the Codex harness", () => {
+  test("the explicit harness selects the prompt for MiMo regardless of API transport", () => {
     const gpt = ProviderTest.model({ id: ModelID.make("gpt-5.2"), api: { id: "gpt-5.2" } as never })
     expect(SystemPrompt.provider(gpt, "default")[0]).toContain("You are Codex")
     expect(SystemPrompt.provider(gpt, "default")[0]).toContain("tools.apply_patch")
 
     const mimo = ProviderTest.model({ id: ModelID.make("mimo-v2.6"), api: { id: "mimo-v2.6" } as never })
-    expect(SystemPrompt.provider(mimo, "codex")[0]).not.toContain("You are Codex")
-    expect(SystemPrompt.provider(mimo, "codex")[0]).not.toContain("tools.apply_patch")
+    expect(SystemPrompt.provider(mimo, "codex")[0]).toContain("You are Codex")
+    expect(SystemPrompt.provider(mimo, "codex")[0]).toContain("tools.apply_patch")
     expect(SystemPrompt.provider(mimo, "default")[0]).not.toContain("You are Codex")
     expect(SystemPrompt.provider(mimo, "default")[0]).not.toContain("tools.apply_patch")
 
@@ -79,6 +79,7 @@ describe("session.system", () => {
       api: { id: "mimo-v2.6-ptc" } as never,
     })
     expect(SystemPrompt.provider(responses, "codex")[0]).toContain("You are Codex")
+    expect(SystemPrompt.provider(responses, "default")[0]).not.toContain("You are Codex")
   })
 
   test("renders machine and repository environment only for Claude models", async () => {
@@ -213,7 +214,7 @@ describe("session.system", () => {
     expect(prompt).not.toContain("When possible, prefer parallelization over sequential tool calls")
   })
 
-  test("uses the GPT prompt for Codex and MiMo Responses models and the normal prompt for versioned MiMo models", () => {
+  test("uses the GPT prompt for GPT models and the normal prompt for MiMo models", () => {
     const gpt = SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("gpt-5.4") }))[0]
     const normal = SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("model-default") }))[0]
     const prompts = ["mimo-v2.5", "mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed", "mimo-v2-pro", "mimo-v2.6"].map(
@@ -227,10 +228,10 @@ describe("session.system", () => {
 
     expect(SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("gpt-5.4-codex") }))[0]).toBe(gpt)
     expect(prompts).toEqual([normal, normal, normal, normal, normal])
-    expect(SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("mimo-v2.6-ptc") }))[0]).toBe(gpt)
+    expect(SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("mimo-v2.6-ptc") }))[0]).toBe(normal)
   })
 
-  test("Codex mode forces the GPT prompt for non-MiMo models", () => {
+  test("Codex mode forces the GPT prompt for every model", () => {
     const gpt = SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("gpt-5.4") }))[0]
     process.env.MIMOCODE_CODEX_MODE = "true"
     const prompt = SystemPrompt.provider(
@@ -241,7 +242,7 @@ describe("session.system", () => {
     )[0]
 
     expect(prompt).toBe(gpt)
-    expect(SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("mimo-v2.6") }))[0]).not.toBe(gpt)
+    expect(SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("mimo-v2.6") }))[0]).toBe(gpt)
     expect(SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("mimo-v2.6-ptc") }))[0]).toBe(gpt)
   })
 

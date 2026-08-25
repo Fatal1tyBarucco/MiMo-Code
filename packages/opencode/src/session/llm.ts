@@ -266,6 +266,7 @@ export type Event = Result["fullStream"] extends AsyncIterable<infer T> ? T : ne
 
 /** Convert per-turn context into the final model-visible user segment. */
 export function turnContextMessages(user: MessageV2.User): ModelMessage[] {
+  if (user.systemMode === "replace-agent") return []
   const context = user.system?.trim()
   if (!context) return []
   return [{
@@ -337,6 +338,8 @@ const live: Layer.Layer<
             : SystemPrompt.agent(input.agent, input.model, input.user.harness)),
           // any custom prompt passed into this call
           ...input.system,
+          // replace-agent is a session system prompt, not per-turn user context
+          ...(input.user.systemMode === "replace-agent" && input.user.system ? [input.user.system] : []),
         ]
           .filter((x) => x)
           .join("\n"),
@@ -489,7 +492,9 @@ const live: Layer.Layer<
       )
       const isWorkflow = language instanceof GitLabWorkflowLanguageModel
       const providerSystem =
-        (isOpenaiOauth || isWorkflow) && input.user.system?.trim() ? [...system, input.user.system] : system
+        input.user.systemMode !== "replace-agent" && (isOpenaiOauth || isWorkflow) && input.user.system?.trim()
+          ? [...system, input.user.system]
+          : system
       if (isOpenaiOauth) options.instructions = providerSystem.join("\n")
       // Reactive prefill-rejection backstop. The PRIMARY mechanism is the
       // proactive guard in ProviderTransform.message()
