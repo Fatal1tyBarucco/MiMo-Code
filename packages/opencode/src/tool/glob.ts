@@ -9,6 +9,7 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import { SessionCwd } from "./session-cwd"
 import DESCRIPTION from "./glob.txt"
 import * as Tool from "./tool"
+import { resolveCurrentSessionPath } from "@/session/memory-path-template"
 
 export const GlobTool = Tool.define(
   "glob",
@@ -40,7 +41,7 @@ export const GlobTool = Tool.define(
             },
           })
 
-          let search = params.path ?? SessionCwd.get(ctx.sessionID)
+          let search = resolveCurrentSessionPath(params.path ?? SessionCwd.get(ctx.sessionID), ctx.sessionID)
           search = path.isAbsolute(search) ? search : path.resolve(SessionCwd.get(ctx.sessionID), search)
           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
           if (info?.type === "File") {

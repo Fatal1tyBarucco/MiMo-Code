@@ -14,6 +14,7 @@ import { Instance } from "../project/instance"
 import { SessionCwd } from "./session-cwd"
 import { trimDiff } from "./edit"
 import { assertWriteAllowed, askEditUnlessMemory } from "./external-directory"
+import { resolveCurrentSessionPath } from "@/session/memory-path-template"
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
 
@@ -33,9 +34,10 @@ export const WriteTool = Tool.define(
       }),
       execute: (params: { content: string; file_path: string }, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const filepath = path.isAbsolute(params.file_path)
-            ? params.file_path
-            : path.join(SessionCwd.get(ctx.sessionID), params.file_path)
+          const inputPath = resolveCurrentSessionPath(params.file_path, ctx.sessionID)
+          const filepath = path.isAbsolute(inputPath)
+            ? inputPath
+            : path.join(SessionCwd.get(ctx.sessionID), inputPath)
           yield* assertWriteAllowed(ctx, filepath)
 
           const exists = yield* fs.existsSafe(filepath)

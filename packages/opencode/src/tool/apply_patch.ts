@@ -16,6 +16,7 @@ import DESCRIPTION from "./apply_patch.txt"
 import { File } from "../file"
 import { Format } from "../format"
 import { Global } from "../global"
+import { resolveCurrentSessionPath } from "@/session/memory-path-template"
 
 const PatchParams = z.object({
   patch_text: z.string().describe("The full patch text that describes all changes to be made"),
@@ -66,7 +67,10 @@ export const ApplyPatchTool = Tool.define(
       let totalDiff = ""
 
       for (const hunk of hunks) {
-        const filePath = path.resolve(SessionCwd.get(ctx.sessionID), hunk.path)
+        const filePath = path.resolve(
+          SessionCwd.get(ctx.sessionID),
+          resolveCurrentSessionPath(hunk.path, ctx.sessionID),
+        )
         yield* assertWriteAllowed(ctx, filePath)
 
         switch (hunk.type) {
@@ -126,7 +130,9 @@ export const ApplyPatchTool = Tool.define(
               if (change.removed) deletions += change.count || 0
             }
 
-            const movePath = hunk.move_path ? path.resolve(SessionCwd.get(ctx.sessionID), hunk.move_path) : undefined
+            const movePath = hunk.move_path
+              ? path.resolve(SessionCwd.get(ctx.sessionID), resolveCurrentSessionPath(hunk.move_path, ctx.sessionID))
+              : undefined
             yield* assertWriteAllowed(ctx, movePath)
 
             fileChanges.push({

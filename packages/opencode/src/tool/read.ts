@@ -12,6 +12,7 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import { SessionCwd } from "./session-cwd"
 import { Instruction } from "../session/instruction"
 import { Provider } from "@/provider"
+import { resolveCurrentSessionPath } from "@/session/memory-path-template"
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 
 const DEFAULT_READ_LIMIT = 2000
@@ -148,7 +149,7 @@ export const ReadTool = Tool.define(
         return yield* Effect.fail(new Error("offset must be greater than or equal to 1"))
       }
 
-      let filepath = params.file_path
+      let filepath = resolveCurrentSessionPath(params.file_path, ctx.sessionID)
       if (!path.isAbsolute(filepath)) {
         filepath = path.resolve(SessionCwd.get(ctx.sessionID), filepath)
       }

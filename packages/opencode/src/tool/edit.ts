@@ -21,6 +21,7 @@ import { assertWriteAllowed, askEditUnlessMemory } from "./external-directory"
 import { assertFileRead } from "./read-state"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Flag } from "@/flag/flag"
+import { resolveCurrentSessionPath } from "@/session/memory-path-template"
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -75,9 +76,10 @@ export const EditTool = Tool.define(
             throw new Error("No changes to apply: old_string and new_string are identical.")
           }
 
-          const filePath = path.isAbsolute(params.file_path)
-            ? params.file_path
-            : path.join(SessionCwd.get(ctx.sessionID), params.file_path)
+          const inputPath = resolveCurrentSessionPath(params.file_path, ctx.sessionID)
+          const filePath = path.isAbsolute(inputPath)
+            ? inputPath
+            : path.join(SessionCwd.get(ctx.sessionID), inputPath)
           yield* assertWriteAllowed(ctx, filePath)
 
           // The "create new file" branch (oldString === "") is effectively a
