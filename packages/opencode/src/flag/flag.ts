@@ -133,6 +133,17 @@ export const Flag = {
     return truthy("MIMOCODE_DISABLE_CHECKPOINT")
   },
   MIMOCODE_DISABLE_AUTOCOMPACT: truthy("MIMOCODE_DISABLE_AUTOCOMPACT"),
+  // Default compaction trigger, used when `compaction.max_context` is not set in
+  // config. Same grammar as that config field: an absolute token count
+  // ("300000"), a shorthand ("300K", "1M"), or a percentage of the model window
+  // ("50%"). Clamped to the model window — it can only lower the trigger, never
+  // raise it. An explicit `compaction.max_context` in config overrides this.
+  // Pairs with MIMOCODE_DISABLE_CHECKPOINT: on the checkpoint-off fallback path
+  // this is how the compaction threshold is tuned via env alone. Read lazily so
+  // tests and in-process embedders can toggle it at runtime.
+  get MIMOCODE_COMPACTION_MAX_CONTEXT() {
+    return process.env["MIMOCODE_COMPACTION_MAX_CONTEXT"]
+  },
   MIMOCODE_DISABLE_MODELS_FETCH: truthy("MIMOCODE_DISABLE_MODELS_FETCH"),
   // Defaults to false. When enabled, every model uses the GPT system prompt
   // and Codex toolset regardless of its model ID.

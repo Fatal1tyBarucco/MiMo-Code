@@ -1,4 +1,5 @@
 import type { Config } from "@/config"
+import { Flag } from "@/flag/flag"
 import type { Provider } from "@/provider"
 import { ProviderTransform } from "@/provider"
 import { Log, Token, Wildcard } from "@/util"
@@ -34,7 +35,7 @@ function reserves(input: { cfg: Config.Info; model: Provider.Model }) {
 }
 
 function budget(input: { cfg: Config.Info; model: Provider.Model }, hard: number, reserved: number) {
-  const configured = input.cfg.compaction?.max_context
+  const configured = input.cfg.compaction?.max_context ?? Flag.MIMOCODE_COMPACTION_MAX_CONTEXT
   if (configured === undefined) return undefined
   const key = `${input.model.providerID}/${input.model.id}`
   const raw =
