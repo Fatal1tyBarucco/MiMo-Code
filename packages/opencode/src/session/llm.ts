@@ -129,9 +129,9 @@ export function isTransientCapacityError(error: unknown): boolean {
  * `memoryRoot` is the same absolute root returned by Memory.root(), so these
  * paths match the files used by checkpoint restore and memory/task detection.
  */
-function buildMemoryInstructions(sessionID: SessionID, projectID: ProjectID, memoryRoot: string): string {
+function buildMemoryInstructions(projectID: ProjectID, memoryRoot: string): string {
   const memoryFile = path.join(memoryRoot, "projects", projectID, "MEMORY.md")
-  const sessionMemoryDir = path.join(memoryRoot, "sessions", sessionID)
+  const sessionMemoryDir = path.join(memoryRoot, "sessions", "current_session_id")
   const globalMemoryFile = path.join(memoryRoot, "global", "MEMORY.md")
   const notesFile = path.join(sessionMemoryDir, "notes.md")
   const checkpointEnabled = !Flag.MIMOCODE_DISABLE_CHECKPOINT
@@ -375,7 +375,7 @@ const live: Layer.Layer<
         // checkpoint-flow call sites cover the writer/rebuild paths; this covers
         // the "agent edits MEMORY.md before any checkpoint" path. Idempotent.
         yield* Effect.promise(() => migrateProjectMemory(projectID)).pipe(Effect.ignore)
-        system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
+        system.push(buildMemoryInstructions(projectID, yield* memory.root()))
       }
 
       // Orchestrator fleet roster: inject a compact one-line-per-session
