@@ -7,7 +7,6 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import { SessionCwd } from "./session-cwd"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
-import { resolveCurrentSessionPath } from "@/session/memory-path-template"
 
 const MAX_LINE_LENGTH = 2000
 
@@ -50,11 +49,10 @@ export const GrepTool = Tool.define(
           })
 
           const effectiveCwd = SessionCwd.get(ctx.sessionID)
-          const inputPath = resolveCurrentSessionPath(params.path ?? effectiveCwd, ctx.sessionID)
           const search = AppFileSystem.resolve(
-            path.isAbsolute(inputPath)
-              ? inputPath
-              : path.join(effectiveCwd, inputPath),
+            path.isAbsolute(params.path ?? effectiveCwd)
+              ? (params.path ?? effectiveCwd)
+              : path.join(effectiveCwd, params.path ?? "."),
           )
           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
           const cwd = info?.type === "Directory" ? search : path.dirname(search)

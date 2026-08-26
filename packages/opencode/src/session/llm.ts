@@ -32,7 +32,6 @@ import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { ActorRegistry } from "@/actor/registry"
 import { Memory } from "@/memory"
-import { CURRENT_SESSION_ID_PLACEHOLDER } from "./memory-path-template"
 import { isRetryableTransientError } from "./retry"
 import * as SessionRetry from "./retry"
 import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
@@ -130,9 +129,9 @@ export function isTransientCapacityError(error: unknown): boolean {
  * `memoryRoot` is the same absolute root returned by Memory.root(), so these
  * paths match the files used by checkpoint restore and memory/task detection.
  */
-export function buildMemoryInstructions(projectID: ProjectID, memoryRoot: string): string {
+function buildMemoryInstructions(projectID: ProjectID, memoryRoot: string): string {
   const memoryFile = path.join(memoryRoot, "projects", projectID, "MEMORY.md")
-  const sessionMemoryDir = path.join(memoryRoot, "sessions", CURRENT_SESSION_ID_PLACEHOLDER)
+  const sessionMemoryDir = path.join(memoryRoot, "sessions", "current_session_id")
   const globalMemoryFile = path.join(memoryRoot, "global", "MEMORY.md")
   const notesFile = path.join(sessionMemoryDir, "notes.md")
   const checkpointEnabled = !Flag.MIMOCODE_DISABLE_CHECKPOINT
@@ -154,11 +153,6 @@ export function buildMemoryInstructions(projectID: ProjectID, memoryRoot: string
 You have a persistent file-based memory system. ${checkpointEnabled ? "Four" : "Two"} file types:
 
 ${files.join("\n")}`,
-    ...(checkpointEnabled
-      ? [
-          `The path segment \`${CURRENT_SESSION_ID_PLACEHOLDER}\` is a stable placeholder for the current session. Keep it verbatim when calling Read, Write, Edit, Glob, Grep, or apply_patch; the runtime resolves it from the tool context.`,
-        ]
-      : []),
     ...(checkpointEnabled
       ? [
           "The checkpoint writer is the sole curator of the structured files. You don't maintain them mid-task — the writer extracts everything from the conversation at checkpoint events.",
