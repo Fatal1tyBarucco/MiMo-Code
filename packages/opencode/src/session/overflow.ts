@@ -12,11 +12,11 @@ const COMPACTION_BUFFER = 33_000
 // summary outputs based on production telemetry of summary token counts.
 const OUTPUT_CAP = 20_000
 
-// Compaction fires when usage reaches this fraction of the working window,
-// leaving the remaining headroom for the summary generation. 0.9 keeps the
+// Compaction fires when usage reaches a fraction of the working window, leaving
+// the remaining headroom for the summary generation. The default 0.9 keeps the
 // trigger at a flat 90% of the model's context regardless of window size,
-// instead of a fixed token reserve that punishes small windows.
-const COMPACTION_TRIGGER_RATIO = 0.9
+// instead of a fixed token reserve that punishes small windows. Override with
+// MIMOCODE_COMPACTION_TRIGGER_RATIO.
 
 const log = Log.create({ service: "session.overflow" })
 const warned = new Set<string>()
@@ -87,7 +87,7 @@ export function contextWindow(input: { cfg: Config.Info; model: Provider.Model }
   return {
     hard,
     effective,
-    usable: Math.floor(effective * COMPACTION_TRIGGER_RATIO),
+    usable: Math.floor(effective * Flag.MIMOCODE_COMPACTION_TRIGGER_RATIO),
     source: configured === undefined ? "model" : "config",
   }
 }

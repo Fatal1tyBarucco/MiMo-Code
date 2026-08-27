@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { contextPressureLevel, contextWindow, isOverflow, pressureLevel, usable } from "../../src/session/overflow"
 import { Token } from "../../src/util"
 import { Session as SessionNs } from "../../src/session"
@@ -162,10 +162,10 @@ describe("isOverflow", () => {
   })
 
   // The compaction trigger is a flat fraction of the window (see
-  // COMPACTION_TRIGGER_RATIO), so it reserves headroom uniformly whether or not
-  // the model publishes a dedicated input cap. This removes the old asymmetry
-  // where a limit.input model triggered compaction later than an equivalent
-  // model without one (issues #10634, #8089, #11086, #12621).
+  // Flag.MIMOCODE_COMPACTION_TRIGGER_RATIO), so it reserves headroom uniformly
+  // whether or not the model publishes a dedicated input cap. This removes the
+  // old asymmetry where a limit.input model triggered compaction later than an
+  // equivalent model without one (issues #10634, #8089, #11086, #12621).
 
   test("reserves headroom via the flat ratio when limit.input is set", () => {
     const model = createModel({ context: 200_000, input: 200_000, output: 32_000 })
@@ -549,6 +549,43 @@ describe("usable", () => {
     // reserved only gates config-budget validation now; the trigger stays 90%.
     const model = createModel({ context: 200_000, output: 32_000 })
     expect(usable({ cfg: mockCfg({ reserved: 5_000 }), model })).toBe(180_000)
+  })
+})
+
+describe("MIMOCODE_COMPACTION_TRIGGER_RATIO", () => {
+  afterEach(() => {
+    delete process.env["MIMOCODE_COMPACTION_TRIGGER_RATIO"]
+  })
+
+  test("a decimal moves the trigger", () => {
+    process.env["MIMOCODE_COMPACTION_TRIGGER_RATIO"] = "0.75"
+    expect(usable({ cfg: mockCfg(), model: createModel({ context: 200_000 }) })).toBe(150_000)
+  })
+
+  test("a percentage is equivalent to the decimal", () => {
+    process.env["MIMOCODE_COMPACTION_TRIGGER_RATIO"] = "75%"
+    expect(usable({ cfg: mockCfg(), model: createModel({ context: 200_000 }) })).toBe(150_000)
+  })
+
+  test("1 lets usage fill the whole working window", () => {
+    process.env["MIMOCODE_COMPACTION_TRIGGER_RATIO"] = "1"
+    expect(usable({ cfg: mockCfg(), model: createModel({ context: 200_000 }) })).toBe(200_000)
+  })
+
+  test("applies on top of the max_context budget rather than replacing it", () => {
+    process.env["MIMOCODE_COMPACTION_TRIGGER_RATIO"] = "0.5"
+    const model = createModel({ context: 200_000 })
+    expect(contextWindow({ cfg: mockCfg({ max_context: "100K" }), model })).toEqual({
+      hard: 200_000,
+      effective: 100_000,
+      usable: 50_000,
+      source: "config",
+    })
+  })
+
+  test.each(["0", "-0.5", "1.5", "150%", "abc", ""])("ignores %p and keeps the 0.9 default", (value) => {
+    process.env["MIMOCODE_COMPACTION_TRIGGER_RATIO"] = value
+    expect(usable({ cfg: mockCfg(), model: createModel({ context: 200_000 }) })).toBe(180_000)
   })
 })
 
