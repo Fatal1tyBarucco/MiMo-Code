@@ -34,7 +34,8 @@ import { contextPressureLevel, usable, isOverflow as overflowCheck } from "./ove
 import { Config } from "@/config"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { Global } from "@/global"
-import { NotFoundError } from "@/storage"
+import { NotFoundError, Database, eq } from "@/storage"
+import { SessionTable } from "./session.sql"
 import { Bus } from "../bus"
 import { ProviderTransform } from "../provider"
 import { SystemPrompt } from "./system"
@@ -75,7 +76,13 @@ import { SessionSummary } from "./summary"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import { SessionProcessor } from "./processor"
 import { buildLLMRequestPrefix } from "./llm-request-prefix"
-import { checkConflict, type ConflictResult } from "@/tool/conflict-detection"
+import {
+  buildAutoWorktreeNotice,
+  firstMutatedMainWorktree,
+  isAutoWorktreeHintSent,
+  markAutoWorktreeHintSent,
+  sessionHasAutoWorktreeNotice,
+} from "@/tool/auto-worktree-hint"
 import {
   serializeTrajectoryMessages,
   withAssistantParts,
@@ -1158,6 +1165,37 @@ export const layer = Layer.effect(
           text,
           synthetic: true,
         })
+      }
+
+      // Auto-worktree notice: once per session, after a completed write or git
+      // mutation landed in some git MAIN worktree. Names that path and carries a
+      // standing rule for any later repo. Path-based on purpose — a session bound
+      // to a non-git scratch dir that `cd`s into another project's main checkout
+      // still hits. Injected as a user-side system-reminder and persisted via
+      // auto_worktree_hint_sent so compaction/rebuild cannot re-inject. Never
+      // touches the system prompt. Nested branch: insertReminders cannot
+      // early-return without skipping the skill/plan reminders that follow.
+      if (input.agent.mode === "primary" && !input.session.parentID) {
+        const alreadySent = yield* Effect.sync(() => isAutoWorktreeHintSent(input.session.id))
+        if (!alreadySent) {
+          if (sessionHasAutoWorktreeNotice(input.messages)) {
+            yield* Effect.sync(() => markAutoWorktreeHintSent(input.session.id))
+          } else {
+            const hit = firstMutatedMainWorktree(input.messages)
+            if (hit) {
+              const part = yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: userMessage.info.id,
+                sessionID: userMessage.info.sessionID,
+                type: "text",
+                text: buildAutoWorktreeNotice(hit),
+                synthetic: true,
+              })
+              userMessage.parts.push(part)
+              yield* Effect.sync(() => markAutoWorktreeHintSent(input.session.id))
+            }
+          }
+        }
       }
 
       const assistantMessage = input.messages.findLast((msg) => msg.info.role === "assistant")
@@ -4297,29 +4335,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               ...(Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT ? [...env, ...instructions.content] : []),
               ...(format.type === "json_schema" ? [STRUCTURED_OUTPUT_SYSTEM_PROMPT] : []),
             ]
-            // Auto-worktree: inject hint on first assistant-less turn if conflict detected.
-            // Checks for no assistant messages (survives compaction/rebuild) + in main worktree.
-            const isGitProject = Instance.project.vcs === "git"
-            const isMainWorktree = Instance.worktree === Instance.project.worktree
-            if (isGitProject && isMainWorktree) {
-              const isFirstAssistantTurn = !msgs.some((m) => m.info.role === "assistant")
-              if (isFirstAssistantTurn) {
-                const directory = yield* InstanceState.directory
-                const conflict = (yield* Effect.promise(() => checkConflict(directory, sessionID))) as ConflictResult
-                if (conflict.hasConflict) {
-                  additions.push(`
-⚠️ Auto-Worktree Notice
-
-This session is running in the main worktree. If you need to write or edit files, consider creating an isolated worktree first:
-
-- Create an isolated worktree: \`git worktree add <path> -b <branch>\` with a path outside the project directory
-
-Conflict detected: ${conflict.reason}${conflict.activeSessionId ? ` (session: ${conflict.activeSessionId})` : ""}
-
-If this task is a simple fix, Q&A, or read-only operation, you can skip this notice and continue.`)
-                }
-              }
-            }
             // Note: `buildLLMRequestPrefix` also returns a `tools` field, but we
             // intentionally don't use it here — the `tools` variable from `resolveTools`
             // (set earlier via `handle.process({tools: ...})`) carries `execute` closures
