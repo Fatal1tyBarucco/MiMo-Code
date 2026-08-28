@@ -55,6 +55,16 @@ import {
   detectTextLoop,
 } from "../session/prompt/text-loop-recovery"
 import {
+  LOOP_STREAK_MAX_SPAN,
+  LOOP_STREAK_TRIGGER_COUNT,
+  applyPersistedCrops,
+  cropMetadata,
+  cropMessagesForStreak,
+  detectStreak,
+  extractAllCrops,
+  streakKey,
+} from "../session/prompt/loop-streak"
+import {
   TEXT_NGRAM_MAX_RECOVERY,
   TEXT_NGRAM_RECOVERY_REMIND,
   TEXT_NGRAM_RECOVERY_REPLAN,
@@ -3167,6 +3177,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const textLoopBuffer: string[] = []
         let textLoopRecoveryAttempts = 0
         let textNgramRecoveryAttempts = 0
+        let loopStreakCropped = false
 
         // Contract (T05): on finish="length", inject a continuation nudge ONLY for
         // plain text. If any non-providerExecuted client tool part exists we bail
@@ -3601,6 +3612,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
 
         while (true) {
+          // Per-iteration: a streak crop on this turn must suppress a duplicate
+          // text-loop recovery user, but must not block a later re-crop if the
+          // model loops again after recovery.
+          loopStreakCropped = false
           // F55: only main agent sets session status to busy; subagent runners
           // must not touch session-level status (Runner.onBusy is Effect.void
           // for non-main actors per F47).
@@ -4027,6 +4042,89 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
+
+          // Request-layer loop-streak crop, aligned with turn recovery
+          // (resume()): no new user, lastUser/parentID unchanged, span stored
+          // as an ignored synthetic part on the existing parent user. Wire
+          // trailing-assistant repair stays in transform.ts. Spans re-apply
+          // on every later request until the feature is off; user speech does
+          // not clear them.
+          const streakCfg = (yield* config.get()).experimental?.loop_streak_recovery
+          if (streakCfg?.enabled) {
+            const existingCrops = extractAllCrops(msgs)
+            if (existingCrops.length > 0) {
+              const reapplied = applyPersistedCrops(msgs, existingCrops)
+              if (reapplied.omitted.length > 0) {
+                // Do NOT set loopStreakCropped here. That flag means "a NEW
+                // crop just fired this iteration" and suppresses the text-loop
+                // fallback. Re-applying an old span must leave text-loop free
+                // to catch a different kind of loop later in the turn.
+                msgs = reapplied.kept as typeof msgs
+                yield* slog.info("loop streak: reapplied persisted crop", {
+                  spans: existingCrops.length,
+                  omitted: reapplied.omitted.length,
+                  spanFrom: existingCrops[existingCrops.length - 1].fromId,
+                  spanTo: existingCrops[existingCrops.length - 1].toId,
+                })
+              }
+            }
+            // New streaks are still detectable on the cropped view (e.g. the
+            // model loops again after recovery). User-speech guard only skips
+            // *new* detection, not re-application of existing spans.
+            if (lastFinished && lastUser.id < lastFinished.id) {
+              const triggerCount = streakCfg.trigger_count ?? LOOP_STREAK_TRIGGER_COUNT
+              const maxSpan = streakCfg.max_span ?? LOOP_STREAK_MAX_SPAN
+              const entries = msgs.flatMap((message) => {
+                if (message.info.role !== "assistant" || !message.info.finish) return []
+                const key = streakKey(message.parts)
+                if (!key) return []
+                return [{ id: message.info.id, key }]
+              })
+              const span = detectStreak(entries, triggerCount, maxSpan)
+              // Not dead: detectStreak.toId is the last *keyed* finished
+              // assistant, while lastFinished is the last finished assistant
+              // even when its streakKey is "". Empty-key tail (text-only
+              // recovery) means the streak already broke — skip a new crop
+              // and leave the historical span to re-apply.
+              if (span && span.toId === lastFinished.id) {
+                const crop = cropMessagesForStreak(msgs, span)
+                if (crop.omitted.length > 0) {
+                  msgs = crop.kept as typeof msgs
+                  // Persist span on the EXISTING parent user (turn-recovery
+                  // shape). ignored+synthetic: not sent to the model, not a
+                  // user-visible bubble, but extractAllCrops still reads it.
+                  const spanPart: MessageV2.TextPart = {
+                    id: PartID.ascending(),
+                    messageID: lastUser.id,
+                    sessionID,
+                    type: "text",
+                    synthetic: true,
+                    ignored: true,
+                    text: "",
+                    metadata: cropMetadata(span),
+                  }
+                  yield* sessions.updatePart(spanPart)
+                  const parentMsg = msgs.findLast((message) => message.info.id === lastUser.id)
+                  if (parentMsg) parentMsg.parts.push(spanPart)
+                  loopStreakCropped = true
+                  yield* slog.info("loop streak: cropped from request", {
+                    spanFrom: span.fromId,
+                    spanTo: span.toId,
+                    anchorId: span.anchorId,
+                    parentUserId: lastUser.id,
+                    nMessages: crop.omittedMessages,
+                    nParts: crop.omittedParts,
+                    omittedBlocks: crop.omittedBlocks,
+                    keptBlocks: crop.keptBlocks,
+                    remainingSimilar: crop.remainingSimilar,
+                    cacheRisk: crop.cacheRisk,
+                    truncatedByCeiling: span.truncated,
+                  })
+                }
+              }
+            }
+          }
+
           msgs = yield* insertReminders({ messages: msgs, agent, model, session })
 
           const msg: MessageV2.Assistant = {
@@ -4637,8 +4735,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             if (textLoopBuffer.length >= TEXT_LOOP_TRIGGER_COUNT) {
               const isTextLoop = detectTextLoop(textLoopBuffer, TEXT_LOOP_TRIGGER_COUNT)
-
-              if (isTextLoop) {
+              // Prefer streak crop (request-layer) over a second recovery user
+              // when this turn already cropped a thinking streak. Re-deriving
+              // detectStreak on the cropped msgs is a false negative — the
+              // streak assistants are gone — so gate on the crop flag.
+              if (isTextLoop && !loopStreakCropped) {
                 if (textLoopRecoveryAttempts >= TEXT_LOOP_MAX_RECOVERY) {
                   yield* slog.info("text loop: max recovery exceeded, terminating")
                   yield* bus.publish(Session.Event.Error, {
