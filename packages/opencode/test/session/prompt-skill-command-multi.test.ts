@@ -46,6 +46,7 @@ describe("skill command with additional mentions", () => {
       provideTmpdirServer(
         Effect.fnUntraced(function* ({ dir, llm }) {
           yield* writeSkill(dir, "skill-profile", "PROFILE_SKILL_MARKER")
+          yield* Effect.promise(() => Bun.write(path.join(dir, "AGENTS.md"), "PROFILE_INSTRUCTION_MARKER"))
           yield* llm.text("ok")
 
           const prompt = yield* SessionPrompt.Service
@@ -77,6 +78,12 @@ describe("skill command with additional mentions", () => {
           })
           const request = (yield* llm.inputs)[0]
           expect(JSON.stringify(request)).toContain("COMMAND_SYSTEM_MARKER")
+          const system = ((request.messages ?? []) as { role: string; content: unknown }[])
+            .flatMap((message) => message.role === "system" && typeof message.content === "string" ? [message.content] : [])
+            .join("\n")
+          expect(system.indexOf("COMMAND_SYSTEM_MARKER")).toBeLessThan(system.indexOf("Skills available in this session:"))
+          expect(system.indexOf("Skills available in this session:")).toBeLessThan(system.indexOf("PROFILE_INSTRUCTION_MARKER"))
+          expect(system.trim().endsWith("PROFILE_INSTRUCTION_MARKER")).toBe(true)
           expect((request.tools as Array<Record<string, unknown>>).map((tool) =>
             typeof tool.function === "object" && tool.function && "name" in tool.function
               ? String(tool.function.name)
@@ -126,10 +133,10 @@ describe("skill command with additional mentions", () => {
           const messages = (request.messages ?? []) as { role: string; content: unknown }[]
           const system = JSON.stringify(messages.filter((message) => message.role === "system"))
           const users = JSON.stringify(messages.filter((message) => message.role === "user"))
-          expect(system).not.toContain("Skills available in this session:")
+          expect(system).toContain("Skills available in this session:")
           expect(system).not.toContain("ALPHA_BODY_MARKER")
           expect(system).not.toContain("BETA_BODY_MARKER")
-          expect(users).toContain("Skills available in this session:")
+          expect(users).not.toContain("Skills available in this session:")
           expect(users).toContain("ALPHA_BODY_MARKER")
           expect(users).toContain("BETA_BODY_MARKER")
 
@@ -173,10 +180,15 @@ describe("skill command with additional mentions", () => {
           expect(visible.map((p) => (p.type === "text" ? p.text : ""))).toContain("/skill-alpha")
 
           const text = user!.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n")
-          expect(text).toContain("Skills available in this session:")
+          expect(text).not.toContain("Skills available in this session:")
           expect(text).toContain('<system-reminder>\n<skill_content name="skill-alpha">')
           expect(text).not.toContain("BETA_BODY_MARKER")
           expect(text).not.toContain("explicitly referenced multiple skills")
+
+          const system = JSON.stringify(
+            (((yield* llm.inputs)[0].messages ?? []) as { role: string }[]).filter((message) => message.role === "system"),
+          )
+          expect(system).toContain("Skills available in this session:")
 
           yield* sessions.remove(session.id)
         }),
@@ -185,10 +197,10 @@ describe("skill command with additional mentions", () => {
     30_000,
   )
 
-  // [TP-R14-01][TP-R14-03] An unchanged catalog is injected once, stays before
-  // the first query after DB rehydration, and never triggers slash mentions from its own descriptions.
+  // [TP-R14-01][TP-R14-03] An unchanged catalog stays in the system tail and
+  // never triggers slash mentions from its own descriptions.
   it.live(
-    "keeps one versioned catalog before user content across turns",
+    "keeps one system catalog across turns without persisting it as user content",
     () =>
       provideTmpdirServer(
         Effect.fnUntraced(function* ({ dir, llm }) {
@@ -218,9 +230,7 @@ describe("skill command with additional mentions", () => {
           const requests = yield* llm.inputs
           const second = JSON.stringify(requests[1].messages ?? [])
           expect(second.match(/Skills available in this session:/g)).toHaveLength(1)
-          expect(second.indexOf("Authoritative skills catalog snapshot v2:")).toBeLessThan(
-            second.indexOf("/skill-alpha"),
-          )
+          expect(second).not.toContain("Authoritative skills catalog snapshot v2:")
           expect(second).toContain("ALPHA_BODY_MARKER")
           expect(second).not.toContain("BETA_BODY_MARKER")
 
@@ -231,13 +241,7 @@ describe("skill command with additional mentions", () => {
                 part.type === "text" && !part.ignored && part.text.includes("Skills available in this session:"),
             ),
           )
-          expect(catalogs).toHaveLength(1)
-          const catalog = catalogs[0]?.type === "text" ? catalogs[0] : undefined
-          expect(catalog?.text ?? "").not.toContain("Catalog-Version")
-          expect(catalog?.metadata?.skillCatalog).toMatchObject({ schema: 2 })
-          expect((catalog?.metadata?.skillCatalog as { version?: string } | undefined)?.version).toMatch(
-            /^[a-f0-9]{64}$/,
-          )
+          expect(catalogs).toHaveLength(0)
           expect(second).not.toContain("Catalog-Version")
 
           yield* sessions.remove(session.id)
@@ -247,10 +251,10 @@ describe("skill command with additional mentions", () => {
     30_000,
   )
 
-  // [TP-R14-02][TP-R14-04][TP-R14-05] A changed catalog appends a full snapshot
-  // to the new turn. The prior snapshot remains byte-for-byte untouched and both reach the model.
+  // [TP-R14-02][TP-R14-04][TP-R14-05] A changed catalog replaces the system-tail
+  // catalog on the next request without rewriting user history.
   it.live(
-    "appends a changed catalog snapshot without rewriting history",
+    "refreshes a changed system catalog without rewriting history",
     () =>
       provideTmpdirServer(
         Effect.fnUntraced(function* ({ dir, llm }) {
@@ -269,12 +273,9 @@ describe("skill command with additional mentions", () => {
             parts: [{ type: "text", text: "first request" }],
           })
 
-          const before = (yield* sessions.messages({ sessionID: session.id })).flatMap((message) =>
-            message.parts.filter(
-              (part) => part.type === "text" && part.text.includes("Authoritative skills catalog snapshot v2:"),
-            ),
-          )[0]
-          expect(before).toBeDefined()
+          const firstRequest = JSON.stringify((yield* llm.inputs)[0].messages ?? [])
+          expect(firstRequest).toContain("<name>skill-alpha</name>")
+          expect(firstRequest).not.toContain("<name>skill-beta</name>")
 
           yield* writeSkill(dir, "skill-beta", "BETA_BODY_MARKER")
           yield* registry.reload()
@@ -286,26 +287,17 @@ describe("skill command with additional mentions", () => {
             parts: [{ type: "text", text: "second request" }],
           })
 
-          const after = (yield* sessions.messages({ sessionID: session.id })).flatMap((message) =>
+          const catalogs = (yield* sessions.messages({ sessionID: session.id })).flatMap((message) =>
             message.parts.filter(
-              (part) => part.type === "text" && part.text.includes("Authoritative skills catalog snapshot v2:"),
+              (part) => part.type === "text" && part.text.includes("Skills available in this session:"),
             ),
           )
-          expect(after).toHaveLength(2)
-          expect(after[0]).toEqual(before)
-          expect(after.every((part) => part.type !== "text" || !part.ignored)).toBe(true)
-          expect(after[0]?.type === "text" ? after[0].text : "").not.toContain("<name>skill-beta</name>")
-          expect(after[1]?.type === "text" ? after[1].text : "").toContain("<name>skill-beta</name>")
+          expect(catalogs).toHaveLength(0)
 
           const request = JSON.stringify((yield* llm.inputs)[1].messages ?? [])
-          expect(request.match(/Authoritative skills catalog snapshot v2:/g)).toHaveLength(2)
-          expect(request).not.toContain("Catalog-Version")
-          expect(request.indexOf("Authoritative skills catalog snapshot v2:")).toBeLessThan(
-            request.indexOf("first request"),
-          )
-          expect(request.lastIndexOf("Authoritative skills catalog snapshot v2:")).toBeLessThan(
-            request.indexOf("second request"),
-          )
+          expect(request.match(/Skills available in this session:/g)).toHaveLength(1)
+          expect(request).toContain("<name>skill-alpha</name>")
+          expect(request).toContain("<name>skill-beta</name>")
 
           yield* sessions.remove(session.id)
         }),
@@ -435,8 +427,8 @@ describe("skill command with additional mentions", () => {
 
           // ...but the catalog the model reads must not list it, so the model
           // cannot pick it up on its own in a later turn.
-          const catalog = user!.parts.flatMap((p) =>
-            p.type === "text" && p.text.includes("Skills available in this session:") ? [p.text] : [],
+          const catalog = (((yield* llm.inputs)[0].messages ?? []) as { role: string; content: unknown }[]).flatMap(
+            (message) => message.role === "system" && typeof message.content === "string" ? [message.content] : [],
           )
           expect(catalog).toHaveLength(1)
           expect(catalog[0]).toContain("<name>skill-alpha</name>")

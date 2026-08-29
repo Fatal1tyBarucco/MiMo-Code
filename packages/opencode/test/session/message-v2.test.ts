@@ -131,7 +131,7 @@ function basePart(messageID: string, id: string) {
 }
 
 describe("session.message-v2.toModelMessage", () => {
-  test("keeps one legacy skills catalog in its historical model position", async () => {
+  test("suppresses legacy user-side skill catalogs", async () => {
     const input: MessageV2.WithParts[] = [
       {
         info: userInfo("m-skills-first"),
@@ -171,17 +171,13 @@ describe("session.message-v2.toModelMessage", () => {
         content: [
           { type: "text", text: "hello" },
           { type: "text", text: "<system-reminder>other</system-reminder>" },
-          {
-            type: "text",
-            text: "<system-reminder>\nSkills available in this session:\nFIRST\n</system-reminder>",
-          },
         ],
       },
       { role: "user", content: [{ type: "text", text: "continue" }] },
     ])
   })
 
-  test("keeps every authoritative skills snapshot before its user query", async () => {
+  test("suppresses persisted skill snapshots after catalogs move to system", async () => {
     const firstSnapshot = [
       "<system-reminder>",
       "Authoritative skills catalog snapshot v2:",
@@ -209,20 +205,8 @@ describe("session.message-v2.toModelMessage", () => {
     ]
 
     expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
-      {
-        role: "user",
-        content: [
-          { type: "text", text: firstSnapshot },
-          { type: "text", text: "hello" },
-        ],
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: secondSnapshot },
-          { type: "text", text: "continue" },
-        ],
-      },
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
     ])
   })
 

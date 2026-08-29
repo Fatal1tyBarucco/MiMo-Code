@@ -28,7 +28,7 @@ import {
   toolAttachmentFilename,
   toolAttachmentPlaceholder,
 } from "./tool-attachment"
-import { isLegacySkillCatalogReminder, isSkillCatalogSnapshot } from "./skill-catalog"
+import { isSkillCatalogReminder } from "./skill-catalog"
 import { collapseCheckpointTail } from "./tail-digest"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
@@ -687,7 +687,6 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
-  let legacySkillCatalogSeen = false
   const source = options?.collapseCheckpointTail ? collapseCheckpointTail(input) : input
 
   const toModelOutput = (options: { toolCallId: string; input: unknown; output: unknown }) => {
@@ -748,20 +747,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         parts: [],
       }
       result.push(userMessage)
-      const parts = msg.parts.toSorted((a, b) => {
-        const aSnapshot = a.type === "text" && a.synthetic === true && isSkillCatalogSnapshot(a.text)
-        const bSnapshot = b.type === "text" && b.synthetic === true && isSkillCatalogSnapshot(b.text)
-        if (aSnapshot !== bSnapshot) return Number(bSnapshot) - Number(aSnapshot)
-        const aLegacy = a.type === "text" && a.synthetic === true && isLegacySkillCatalogReminder(a.text)
-        const bLegacy = b.type === "text" && b.synthetic === true && isLegacySkillCatalogReminder(b.text)
-        return Number(aLegacy) - Number(bLegacy)
-      })
-      for (const part of parts) {
+      for (const part of msg.parts) {
         if (part.type === "text") {
-          if (part.synthetic && isLegacySkillCatalogReminder(part.text)) {
-            if (legacySkillCatalogSeen || part.ignored) continue
-            legacySkillCatalogSeen = true
-          }
+          // Skill catalogs moved to the system tail. Suppress snapshots persisted
+          // by older versions so resumed sessions do not receive a duplicate user-side catalog.
+          if (part.synthetic && isSkillCatalogReminder(part.text)) continue
           if (!part.ignored)
             userMessage.parts.push({
               type: "text",

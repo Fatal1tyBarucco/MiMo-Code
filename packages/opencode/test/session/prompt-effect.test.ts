@@ -1051,36 +1051,45 @@ it.live("resume continues an incomplete assistant without creating or rewriting 
   ),
 )
 
-it.live("loop injects instruction files but not the dynamic environment block", () =>
-  withoutDynamicSystemPrompt(() =>
-    provideTmpdirServer(
-      Effect.fnUntraced(function* ({ llm }) {
-        const prompt = yield* SessionPrompt.Service
-        const sessions = yield* Session.Service
-        const marker = "dynamic-instruction-marker"
-        yield* Effect.promise(() => Bun.write(path.join(Instance.directory, "AGENTS.md"), marker))
-        const chat = yield* sessions.create({
-          title: "No cwd",
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        })
-        yield* prompt.prompt({
-          sessionID: chat.id,
-          agent: "build",
-          model: ref,
-          noReply: true,
-          parts: [{ type: "text", text: "hello" }],
-        })
-        yield* llm.text("world")
+it.live(
+  "loop injects instruction files but not the dynamic environment block",
+  () =>
+    withoutDynamicSystemPrompt(() =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const marker = "dynamic-instruction-marker"
+          yield* Effect.promise(() => Bun.write(path.join(Instance.directory, "AGENTS.md"), marker))
+          const chat = yield* sessions.create({
+            title: "No cwd",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
+          yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "build",
+            model: ref,
+            noReply: true,
+            parts: [{ type: "text", text: "hello" }],
+          })
+          yield* llm.text("world")
 
-        yield* prompt.loop({ sessionID: chat.id })
+          yield* prompt.loop({ sessionID: chat.id })
 
-        const inputs = JSON.stringify(yield* llm.inputs)
-        expect(inputs).not.toContain("Working directory:")
-        expect(inputs).toContain(marker)
-      }),
-      { git: true, config: providerCfg },
+          const inputs = yield* llm.inputs
+          const serialized = JSON.stringify(inputs)
+          const system = ((inputs[0].messages ?? []) as { role: string; content: unknown }[])
+            .flatMap((message) => message.role === "system" && typeof message.content === "string" ? [message.content] : [])
+            .join("\n")
+          expect(serialized).not.toContain("Working directory:")
+          expect(system).toContain("Skills available in this session:")
+          expect(system.indexOf("Skills available in this session:")).toBeLessThan(system.indexOf(marker))
+          expect(system.trim().endsWith(marker)).toBe(true)
+        }),
+        { git: true, config: providerCfg },
+      ),
     ),
-  ),
+  30_000,
 )
 
 it.live("loop injects the dynamic environment block only when the flag is set", () =>
