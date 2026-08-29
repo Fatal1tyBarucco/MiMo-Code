@@ -53,6 +53,25 @@ export const SessionTable = sqliteTable(
   ],
 )
 
+export const SessionPrefixSnapshotTable = sqliteTable(
+  "session_prefix_snapshot",
+  {
+    session_id: text()
+      .$type<SessionID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    profile_key: text().notNull(),
+    system: text({ mode: "json" }).$type<string[]>().notNull(),
+    system_hash: text().notNull(),
+    tools_hash: text().notNull(),
+    watermark_message_id: text().$type<MessageID>().notNull(),
+    revision: integer().notNull(),
+    created_at: integer().notNull(),
+    updated_at: integer().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.session_id, table.profile_key] })],
+)
+
 export const MessageTable = sqliteTable(
   "message",
   {

@@ -251,10 +251,10 @@ describe("skill command with additional mentions", () => {
     30_000,
   )
 
-  // [TP-R14-02][TP-R14-04][TP-R14-05] A changed catalog replaces the system-tail
-  // catalog on the next request without rewriting user history.
+  // [TP-R14-02][TP-R14-04][TP-R14-05] A session keeps its first system-tail
+  // catalog even when the registry changes.
   it.live(
-    "refreshes a changed system catalog without rewriting history",
+    "keeps the session catalog frozen after a registry reload",
     () =>
       provideTmpdirServer(
         Effect.fnUntraced(function* ({ dir, llm }) {
@@ -297,7 +297,7 @@ describe("skill command with additional mentions", () => {
           const request = JSON.stringify((yield* llm.inputs)[1].messages ?? [])
           expect(request.match(/Skills available in this session:/g)).toHaveLength(1)
           expect(request).toContain("<name>skill-alpha</name>")
-          expect(request).toContain("<name>skill-beta</name>")
+          expect(request).not.toContain("<name>skill-beta</name>")
 
           yield* sessions.remove(session.id)
         }),
