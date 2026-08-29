@@ -358,11 +358,11 @@ const live: Layer.Layer<
       const system: string[] = []
       system.push(
         [
-          ...(replaceAgent ? [] : SystemPrompt.agent(input.agent, input.model, input.user.harness)),
-          // any custom prompt passed into this call
-          ...input.system,
-          // replace-agent is a session system prompt, not per-turn user context
-          ...(replaceAgent && input.user.system ? [input.user.system] : []),
+          // replace-agent is the session's base system prompt, so it must occupy
+          // the same leading position as the agent prompt it replaces.
+          ...(replaceAgent && input.user.system
+            ? [input.user.system]
+            : SystemPrompt.agent(input.agent, input.model, input.user.harness)),
         ]
           .filter((x) => x)
           .join("\n"),
@@ -433,13 +433,15 @@ const live: Layer.Layer<
         if (lines.length > 0) system.push(`${ROSTER_HEADER}\n${lines.join("\n")}`)
       }
 
-      // Plugins still see the multi-part array (base prompt as [0], memory as a
-      // trailing element) so hooks that index or append parts keep working.
+      // Plugins transform the stable base before the caller-controlled tail.
       yield* plugin.trigger(
         "experimental.chat.system.transform",
         { sessionID: input.sessionID, model: input.model },
         { system },
       )
+
+      // Keep skill reminders at the tail and instruction files after them.
+      system.push(...input.system)
 
       // Collapse to a single system message. The historical 2-part split existed
       // only to keep a byte-stable cache prefix separate from the memory block's

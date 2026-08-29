@@ -1,6 +1,5 @@
 import path from "path"
 import os from "os"
-import { createHash } from "node:crypto"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
@@ -141,11 +140,7 @@ import {
 } from "@/tool/mcp-tool-search"
 import { isMcpToolSearchEnabled, usesGPTToolset } from "@/tool/gpt"
 import { GPT_TOP_LEVEL_TOOLS } from "@/tool/tool-script-ref"
-import {
-  canonicalSkillCatalog,
-  isSkillCatalogSnapshot,
-  skillCatalogSnapshotVersion,
-} from "./skill-catalog"
+import { SessionPrefixSnapshot } from "./prefix-snapshot"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -493,22 +488,43 @@ export const layer = Layer.effect(
         if (!captureSession) return empty
         const capturePrompt = yield* sessions.resolvePrompt({ sessionID: input.sessionID })
         const captureMessages = input.msgs as MessageV2.WithParts[]
-        const [env, instructions] = yield* Effect.all([
-          Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
-            ? sys.environment(model, captureSession.time.created, capturePrompt.harness)
-            : Effect.succeed([]),
-          instruction.system().pipe(Effect.orDie),
-        ])
-        // (checkpoint-writer never requests json_schema output, so STRUCTURED_OUTPUT_SYSTEM_PROMPT
-        // is not included; parent's runLoop adds it conditionally based on user.format)
-        // Must stay byte-identical to the runLoop's additions for Anthropic prefix-cache parity.
-        const additions = [...env, ...(Flag.MIMOCODE_DISABLE_INSTRUCTIONS ? [] : instructions.content)]
+        const captureUser = captureMessages.findLast((message) => message.info.role === "user")
+        if (!captureUser || captureUser.info.role !== "user") return empty
+        const runtimePermission = Agent.runtimePermission(ag, captureSession.permission)
+        const key = SessionPrefixSnapshot.profileKey({
+          providerID: model.providerID,
+          modelID: model.id,
+          agent: ag.name,
+          agentID: captureUser.info.agentID ?? "main",
+          harness: capturePrompt.harness,
+          systemMode: capturePrompt.systemMode,
+          system: capturePrompt.system ?? "",
+          permission: runtimePermission,
+        })
+        const frozen = yield* SessionPrefixSnapshot.get(input.sessionID, key)
+        const additions = frozen
+          ? []
+          : yield* Effect.gen(function* () {
+              const [env, skills, instructions] = yield* Effect.all([
+                Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+                  ? sys.environment(model, captureSession.time.created, capturePrompt.harness)
+                  : Effect.succeed([]),
+                sys.skills({ ...ag, permission: runtimePermission }),
+                instruction.system().pipe(Effect.orDie),
+              ])
+              return [
+                ...env,
+                ...(skills ? [skills] : []),
+                ...(Flag.MIMOCODE_DISABLE_INSTRUCTIONS ? [] : instructions.content),
+              ]
+            })
         const prefix = yield* buildLLMRequestPrefix({
           sessionID: input.sessionID,
           agent: ag,
           model,
           msgs: captureMessages,
           additions,
+          prebuiltSystem: frozen?.system,
           prompt: capturePrompt,
         }).pipe(
           Effect.provideService(LLM.Service, llm),
@@ -1141,49 +1157,6 @@ export const layer = Layer.effect(
         ...input.agent,
         permission: Agent.runtimePermission(input.agent, input.session.permission),
       }
-      const actor = userMessage.info.agentID
-        ? yield* actorRegistry
-            .get(input.session.id, userMessage.info.agentID)
-            .pipe(Effect.orElseSucceed(() => undefined))
-        : undefined
-      const inheritsSkillCatalog =
-        actor?.contextMode === "full" && (actor.mode === "subagent" || actor.mode === "peer")
-      // A full-context fork already receives the parent's frozen model-message prefix,
-      // including its authoritative skills snapshot. Injecting again into the fork's
-      // own task message duplicates the catalog and moves static content past the query.
-      const skills = inheritsSkillCatalog ? undefined : yield* sys.skills(runtimeAgent)
-      if (skills) {
-        const canonicalCatalog = canonicalSkillCatalog(skills)
-        const catalogVersion = createHash("sha256").update(canonicalCatalog).digest("hex")
-        const latestVersion = input.messages
-          .flatMap((message) =>
-            message.parts.flatMap((part) => {
-              if (part.type !== "text" || !part.synthetic || part.ignored || !isSkillCatalogSnapshot(part.text)) return []
-              return skillCatalogSnapshotVersion(part.metadata) ?? []
-            }),
-          )
-          .at(-1)
-        if (latestVersion !== catalogVersion) {
-          const catalogText = [
-            "<system-reminder>",
-            "Authoritative skills catalog snapshot v2:",
-            "When multiple snapshots exist, the last one is authoritative.",
-            canonicalCatalog,
-            "</system-reminder>",
-          ].join("\n")
-          const part = yield* sessions.updatePart({
-            id: PartID.ascending(),
-            messageID: userMessage.info.id,
-            sessionID: userMessage.info.sessionID,
-            type: "text",
-            text: catalogText,
-            synthetic: true,
-            metadata: { skillCatalog: { schema: 2, version: catalogVersion } },
-          })
-          userMessage.parts.unshift(part)
-        }
-      }
-
       const composeModeMsg = input.messages.find(
         (msg) => msg.info.role === "user" && msg.info.agent === "compose",
       )
@@ -4448,30 +4421,41 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               return "continue" as const
             }
 
-            const [env, instructions] = yield* Effect.all([
-              Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
-                ? sys.environment(model, session.time.created, sessionPrompt.harness)
-                : Effect.succeed([]),
-              instruction.system().pipe(Effect.orDie),
-            ])
-            // Surface which instruction files (CLAUDE.md, AGENTS.md, ...) were loaded.
-            // Only for primary sessions (subagents would be noisy) and once per session.
-            if (!session.parentID && !instructionsNotified.has(sessionID)) {
-              instructionsNotified.add(sessionID)
-              const worktree = (yield* InstanceState.context).worktree
-              const files = Array.from(instructions.paths, (p) => Instruction.display(p, worktree))
-              if (files.length > 0) {
-                yield* bus.publish(TuiEvent.InstructionsLoaded, { files }).pipe(Effect.ignore)
+            const runtimePermission = Agent.runtimePermission(agent, session.permission)
+            const prefixProfileKey = SessionPrefixSnapshot.profileKey({
+              providerID: model.providerID,
+              modelID: model.id,
+              agent: agent.name,
+              agentID: lastUser.agentID ?? "main",
+              harness: sessionPrompt.harness,
+              systemMode: sessionPrompt.systemMode,
+              system: sessionPrompt.system ?? "",
+              permission: runtimePermission,
+            })
+            const frozen = yield* SessionPrefixSnapshot.get(sessionID, prefixProfileKey)
+            const currentAdditions = Effect.fnUntraced(function* () {
+              const [env, skills, instructions] = yield* Effect.all([
+                Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+                  ? sys.environment(model, session.time.created, sessionPrompt.harness)
+                  : Effect.succeed([]),
+                sys.skills({ ...agent, permission: runtimePermission }),
+                instruction.system().pipe(Effect.orDie),
+              ])
+              if (!session.parentID && !instructionsNotified.has(sessionID)) {
+                instructionsNotified.add(sessionID)
+                const worktree = (yield* InstanceState.context).worktree
+                const files = Array.from(instructions.paths, (path) => Instruction.display(path, worktree))
+                if (files.length > 0) {
+                  yield* bus.publish(TuiEvent.InstructionsLoaded, { files }).pipe(Effect.ignore)
+                }
               }
-            }
-            // Instruction files ship by default; the runtime environment block is opt-in
-            // (`env` is already empty unless MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT is set) and the
-            // instruction block is opt-out via MIMOCODE_DISABLE_INSTRUCTIONS.
-            const additions = [
-              ...env,
-              ...(Flag.MIMOCODE_DISABLE_INSTRUCTIONS ? [] : instructions.content),
-              ...(format.type === "json_schema" ? [STRUCTURED_OUTPUT_SYSTEM_PROMPT] : []),
-            ]
+              return [
+                ...env,
+                ...(format.type === "json_schema" ? [STRUCTURED_OUTPUT_SYSTEM_PROMPT] : []),
+                ...(skills ? [skills] : []),
+                ...(Flag.MIMOCODE_DISABLE_INSTRUCTIONS ? [] : instructions.content),
+              ]
+            })
             // Note: `buildLLMRequestPrefix` also returns a `tools` field, but we
             // intentionally don't use it here — the `tools` variable from `resolveTools`
             // (set earlier via `handle.process({tools: ...})`) carries `execute` closures
@@ -4481,23 +4465,59 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // Main runLoop: no watermark — LLM must see the full msgs list,
             // including this turn's intermediate assistant turns (tool reads,
             // task creates, etc.) so each step doesn't replay from the bare
-            // user prompt. The watermark is for fork capture only (frozen
-            // snapshot of parent-view at spawn time).
-            const { system: prebuiltSystem, inheritedMessages: modelMsgs } =
-              yield* buildLLMRequestPrefix({
+            // user prompt. Snapshot watermarks are boundary metadata, never a
+            // reason to slice the main request history.
+            const initialPrefix = yield* buildLLMRequestPrefix({
+              sessionID,
+              agent,
+              model,
+              msgs,
+              additions: frozen ? [] : yield* currentAdditions(),
+              prebuiltSystem: frozen?.system,
+              prompt: sessionPrompt,
+              // Rebuild tails collapse into an activity log so hollow
+              // tool_results never look like a live transcript (anti-hallucination).
+              collapseCheckpointTail: true,
+            }).pipe(
+              Effect.provideService(LLM.Service, llm),
+              Effect.provideService(ToolRegistry.Service, registry),
+            )
+            const currentToolsHash = SessionPrefixSnapshot.toolsHash(tools, activeTools)
+            const resolvedPrefix = yield* Effect.gen(function* () {
+              if (!frozen) {
+                const snapshot = yield* SessionPrefixSnapshot.pin({
+                  sessionID,
+                  profileKey: prefixProfileKey,
+                  system: initialPrefix.system,
+                  toolsHash: currentToolsHash,
+                  watermarkMessageID: lastUser.id,
+                })
+                return { prefix: initialPrefix, snapshot }
+              }
+              if (frozen.tools_hash === currentToolsHash) return { prefix: initialPrefix, snapshot: frozen }
+              const prefix = yield* buildLLMRequestPrefix({
                 sessionID,
                 agent,
                 model,
                 msgs,
-                additions,
+                additions: yield* currentAdditions(),
                 prompt: sessionPrompt,
-                // Rebuild tails collapse into an activity log so hollow
-                // tool_results never look like a live transcript (anti-hallucination).
                 collapseCheckpointTail: true,
               }).pipe(
                 Effect.provideService(LLM.Service, llm),
                 Effect.provideService(ToolRegistry.Service, registry),
               )
+              const snapshot = yield* SessionPrefixSnapshot.rotate({
+                sessionID,
+                profileKey: prefixProfileKey,
+                system: prefix.system,
+                toolsHash: currentToolsHash,
+                watermarkMessageID: lastUser.id,
+              })
+              return { prefix, snapshot }
+            })
+            const prebuiltSystem = resolvedPrefix.prefix.system
+            const modelMsgs = resolvedPrefix.prefix.inheritedMessages
             lastSystemPrompt = prebuiltSystem
             const cfg = yield* config.get()
             const maxModeCfg = cfg.experimental?.maxMode
@@ -4510,9 +4530,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               permission: session.permission,
               sessionID,
               parentSessionID: session.parentID,
-              // system: additions is preserved for non-LLM consumers of StreamInput (e.g.,
-              // MessageV2.User.system for logging/replay); llm.stream itself uses prebuiltSystem.
-              system: additions,
+              system: [],
               prebuiltSystem,
               messages: [...modelMsgs, ...(isLastStep ? [{ role: "user" as const, content: MAX_STEPS }] : [])],
               mergeTurnContextIntoLastUser: true,
@@ -4614,6 +4632,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   .pipe(Effect.ignore),
               ),
             )
+
+            if (handle.message.time.completed && !handle.message.error) {
+              yield* SessionPrefixSnapshot.advance({
+                sessionID,
+                profileKey: prefixProfileKey,
+                revision: resolvedPrefix.snapshot.revision,
+                watermarkMessageID: handle.message.id,
+              })
+            }
 
             if (
               result === "continue" &&
