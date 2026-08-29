@@ -327,6 +327,49 @@ const PREDICT_SYSTEM = `You predict the single most likely next message a user w
 
 const PREDICT_NUDGE = `Based on the conversation above, write the user's most likely next message:`
 
+const isSyntheticPart = (part: MessageV2.Part) => "synthetic" in part && part.synthetic === true
+
+/**
+ * Builds the context `predict` feeds the model, or `undefined` when the session
+ * is not in a predictable state.
+ *
+ * Up to 3 most recent real user queries (chronological) plus the assistant turn
+ * that answered the newest one — that turn carries the tool outputs and final
+ * text. Earlier assistant turns are dropped to keep the prompt small.
+ *
+ * Synthetic parts are stripped from the user queries. `insertReminders` persists
+ * the authoritative skills catalog snapshot and auto-loaded SKILL.md bodies onto
+ * the user message, and `toModelMessages` replays every non-ignored part, so
+ * keeping them here would dwarf the real queries and pull a small model toward
+ * echoing harness instructions instead of predicting what the user would type.
+ */
+export function predictContext(history: readonly MessageV2.WithParts[]) {
+  const real = (m: MessageV2.WithParts) => m.info.role === "user" && !m.parts.every(isSyntheticPart)
+  const userIdx = history.findLastIndex(real)
+  if (userIdx === -1) return
+
+  // Only the assistant turn that actually answered this user message counts.
+  // Bail if that turn is still running (an incomplete assistant after it), so we
+  // never pair the newest prompt with a stale/older result.
+  const assistants = history
+    .slice(userIdx + 1)
+    .filter((m): m is MessageV2.WithParts & { info: MessageV2.Assistant } => m.info.role === "assistant")
+  if (assistants.length === 0) return
+  if (assistants.some((m) => m.info.time.completed === undefined)) return
+  const assistant = assistants[assistants.length - 1]
+
+  return {
+    assistant,
+    messages: [
+      ...history
+        .filter(real)
+        .slice(-3)
+        .map((m) => ({ ...m, parts: m.parts.filter((p) => !isSyntheticPart(p)) })),
+      assistant,
+    ],
+  }
+}
+
 const OUTPUT_LENGTH_CONTINUATION_LIMIT = Flag.MIMOCODE_OUTPUT_LENGTH_CONTINUATION_LIMIT
 const INVALID_OUTPUT_CONTINUATION_LIMIT = Flag.MIMOCODE_INVALID_OUTPUT_CONTINUATION_LIMIT
 const TEXT_TOOL_CALL_RETRY_LIMIT = Flag.MIMOCODE_TEXT_TOOL_CALL_RETRY_LIMIT
@@ -441,7 +484,8 @@ export const layer = Layer.effect(
         ])
         // (checkpoint-writer never requests json_schema output, so STRUCTURED_OUTPUT_SYSTEM_PROMPT
         // is not included; parent's runLoop adds it conditionally based on user.format)
-        const additions = Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT ? [...env, ...instructions.content] : []
+        // Must stay byte-identical to the runLoop's additions for Anthropic prefix-cache parity.
+        const additions = [...env, ...(Flag.MIMOCODE_DISABLE_INSTRUCTIONS ? [] : instructions.content)]
         const prefix = yield* buildLLMRequestPrefix({
           sessionID: input.sessionID,
           agent: ag,
@@ -983,46 +1027,24 @@ export const layer = Layer.effect(
       const cfg = yield* config.get()
       if (cfg.experimental?.predict_next_prompt === false) return ""
 
-      const history = yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" })
-      const real = (m: MessageV2.WithParts) =>
-        m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
-      const userIdx = history.findLastIndex(real)
-      if (userIdx === -1) return ""
-      const lastUser = history[userIdx]
-      if (lastUser.info.role !== "user") return ""
-
-      // Only the assistant turn that actually answered this user message counts.
-      // Bail if that turn is still running (an incomplete assistant after it),
-      // so we never pair the newest prompt with a stale/older result.
-      const assistants = history
-        .slice(userIdx + 1)
-        .filter((m): m is MessageV2.WithParts & { info: MessageV2.Assistant } => m.info.role === "assistant")
-      if (assistants.length === 0) return ""
-      if (assistants.some((m) => m.info.time.completed === undefined)) return ""
-      const lastAssistant = assistants[assistants.length - 1]
-
-      // Context fed to the prediction: up to 3 most recent user queries
-      // (chronological) plus the latest assistant turn (which carries tool
-      // outputs + final assistant text). Earlier assistant turns are dropped
-      // to keep the prompt small.
-      const recentUsers = history.filter(real).slice(-3)
-      const contextMsgs = [...recentUsers, lastAssistant]
+      const context = predictContext(yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" }))
+      if (!context) return ""
 
       const base = yield* agents.get("title")
       if (!base) return ""
       const mdl = base.modelRef
-        ? yield* provider.resolveModelRef(base.modelRef, lastAssistant.info.providerID)
+        ? yield* provider.resolveModelRef(base.modelRef, context.assistant.info.providerID)
         : base.model
           ? yield* provider.getModel(base.model.providerID, base.model.modelID)
-          : ((yield* provider.getSmallModel(lastAssistant.info.providerID)) ??
-            (yield* provider.getModel(lastAssistant.info.providerID, lastAssistant.info.modelID)))
+          : ((yield* provider.getSmallModel(context.assistant.info.providerID)) ??
+            (yield* provider.getModel(context.assistant.info.providerID, context.assistant.info.modelID)))
 
       // Side-channel call: bypass llm.stream so prediction stays out of the
       // session trajectory and never triggers session-coupled plugin hooks
       // (chat.params, chat.headers, system.transform, memory instructions,
       // x-session-affinity). Still publishes Metrics.ModelCall so the
       // prediction cost shows up in analytics.
-      const msgs = yield* MessageV2.toModelMessagesEffect(contextMsgs, mdl, { stripMedia: true })
+      const msgs = yield* MessageV2.toModelMessagesEffect(context.messages, mdl, { stripMedia: true })
       const language = yield* provider.getLanguage(mdl)
       const wrapped = wrapLanguageModel({
         model: language,
@@ -4293,8 +4315,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 yield* bus.publish(TuiEvent.InstructionsLoaded, { files }).pipe(Effect.ignore)
               }
             }
+            // Instruction files ship by default; the runtime environment block is opt-in
+            // (`env` is already empty unless MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT is set) and the
+            // instruction block is opt-out via MIMOCODE_DISABLE_INSTRUCTIONS.
             const additions = [
-              ...(Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT ? [...env, ...instructions.content] : []),
+              ...env,
+              ...(Flag.MIMOCODE_DISABLE_INSTRUCTIONS ? [] : instructions.content),
               ...(format.type === "json_schema" ? [STRUCTURED_OUTPUT_SYSTEM_PROMPT] : []),
             ]
             // Auto-worktree: inject hint on first assistant-less turn if conflict detected.

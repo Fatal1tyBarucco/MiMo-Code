@@ -106,11 +106,12 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
   )
 }
 
-function withoutDynamicSystemPrompt<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
+function dynamicSystemPrompt<A, E, R>(value: string | undefined, fx: () => Effect.Effect<A, E, R>) {
   return Effect.acquireUseRelease(
     Effect.sync(() => {
       const previous = process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
-      delete process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+      if (value === undefined) delete process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+      else process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT = value
       return previous
     }),
     () => fx(),
@@ -121,6 +122,9 @@ function withoutDynamicSystemPrompt<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
       }),
   )
 }
+
+const withoutDynamicSystemPrompt = <A, E, R>(fx: () => Effect.Effect<A, E, R>) => dynamicSystemPrompt(undefined, fx)
+const withDynamicSystemPrompt = <A, E, R>(fx: () => Effect.Effect<A, E, R>) => dynamicSystemPrompt("true", fx)
 
 function toolPart(parts: MessageV2.Part[]) {
   return parts.find((part): part is MessageV2.ToolPart => part.type === "tool")
@@ -1047,7 +1051,7 @@ it.live("resume continues an incomplete assistant without creating or rewriting 
   ),
 )
 
-it.live("loop does not inject dynamic system prompt additions", () =>
+it.live("loop injects instruction files but not the dynamic environment block", () =>
   withoutDynamicSystemPrompt(() =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
@@ -1072,7 +1076,39 @@ it.live("loop does not inject dynamic system prompt additions", () =>
 
         const inputs = JSON.stringify(yield* llm.inputs)
         expect(inputs).not.toContain("Working directory:")
-        expect(inputs).not.toContain(marker)
+        expect(inputs).toContain(marker)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  ),
+)
+
+it.live("loop injects the dynamic environment block only when the flag is set", () =>
+  withDynamicSystemPrompt(() =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const marker = "dynamic-instruction-marker"
+        yield* Effect.promise(() => Bun.write(path.join(Instance.directory, "AGENTS.md"), marker))
+        const chat = yield* sessions.create({
+          title: "With cwd",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          noReply: true,
+          parts: [{ type: "text", text: "hello" }],
+        })
+        yield* llm.text("world")
+
+        yield* prompt.loop({ sessionID: chat.id })
+
+        const inputs = JSON.stringify(yield* llm.inputs)
+        expect(inputs).toContain("Working directory:")
+        expect(inputs).toContain(marker)
       }),
       { git: true, config: providerCfg },
     ),
