@@ -59,6 +59,8 @@ import { testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { Metrics } from "../../src/metrics"
+import { Database, eq } from "../../src/storage"
+import { SessionPrefixSnapshotTable } from "../../src/session/session.sql"
 
 void Log.init({ print: false })
 
@@ -1085,6 +1087,73 @@ it.live(
           expect(system).toContain("Skills available in this session:")
           expect(system.indexOf("Skills available in this session:")).toBeLessThan(system.indexOf(marker))
           expect(system.trim().endsWith(marker)).toBe(true)
+        }),
+        { git: true, config: providerCfg },
+      ),
+    ),
+  30_000,
+)
+
+it.live(
+  "reuses the frozen system prefix for later queries in the same session",
+  () =>
+    withoutDynamicSystemPrompt(() =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const file = path.join(Instance.directory, "AGENTS.md")
+          yield* Effect.promise(() => Bun.write(file, "PREFIX_INSTRUCTION_V1"))
+          const chat = yield* sessions.create({
+            title: "Frozen prefix",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
+
+          yield* llm.text("first")
+          yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "build",
+            model: ref,
+            parts: [{ type: "text", text: "first query" }],
+          })
+          yield* Effect.promise(() => Bun.write(file, "PREFIX_INSTRUCTION_V2"))
+          yield* llm.text("second")
+          yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "build",
+            model: ref,
+            parts: [{ type: "text", text: "second query" }],
+          })
+
+          const inputs = yield* llm.inputs
+          const systems = inputs.slice(0, 2).map((input) =>
+            ((input.messages ?? []) as { role: string; content: unknown }[])
+              .flatMap((message) =>
+                message.role === "system" && typeof message.content === "string" ? [message.content] : [],
+              )
+              .join("\n"),
+          )
+          expect(systems).toHaveLength(2)
+          expect(systems[0]).toContain("PREFIX_INSTRUCTION_V1")
+          expect(systems[1]).toBe(systems[0])
+          expect(systems[1]).not.toContain("PREFIX_INSTRUCTION_V2")
+
+          const snapshots = yield* Effect.sync(() =>
+            Database.use((db) =>
+              db
+                .select()
+                .from(SessionPrefixSnapshotTable)
+                .where(eq(SessionPrefixSnapshotTable.session_id, chat.id))
+                .all(),
+            ),
+          )
+          const messages = yield* sessions.messages({ sessionID: chat.id })
+          const lastAssistant = messages.findLast((message) => message.info.role === "assistant")
+          expect(snapshots).toHaveLength(1)
+          expect(snapshots[0]).toMatchObject({
+            revision: 1,
+            watermark_message_id: lastAssistant?.info.id,
+          })
         }),
         { git: true, config: providerCfg },
       ),

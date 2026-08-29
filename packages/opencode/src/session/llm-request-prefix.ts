@@ -42,6 +42,8 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
    * then instruction files. Caller is responsible for the ordering and content.
    */
   additions: string[]
+  /** Frozen Session/Fork system; bypasses all system regeneration when present. */
+  prebuiltSystem?: string[]
   prompt?: PromptConfig
   /**
    * Collapse post-checkpoint rebuild tails into an activity log. Enable for the
@@ -74,14 +76,16 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
     : (lastUserMsg.info as MessageV2.User)
 
   // Build system using LLM.buildSystemArray (single source of truth shared with stream())
-  const system = yield* llm.buildSystemArray({
-    agent: input.agent,
-    model: input.model,
-    system: input.additions,
-    user: lastUser,
-    sessionID: input.sessionID as string,
-    agentID: lastUser.agentID,
-  })
+  const system =
+    input.prebuiltSystem ??
+    (yield* llm.buildSystemArray({
+      agent: input.agent,
+      model: input.model,
+      system: input.additions,
+      user: lastUser,
+      sessionID: input.sessionID as string,
+      agentID: lastUser.agentID,
+    }))
 
   // Resolve tools using parent agent's permission and toolAllowlist
   const toolDefs = yield* toolRegistry.tools({
