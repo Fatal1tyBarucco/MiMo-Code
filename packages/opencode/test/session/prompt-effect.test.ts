@@ -914,7 +914,7 @@ it.live("persists auto as its own harness mode", () =>
   ),
 )
 
-it.live("restores the pinned prompt after compaction without sending it to the summarizer", () =>
+it.live("uses the frozen system and appends the compaction prompt to the existing conversation", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm }) {
       const prompt = yield* SessionPrompt.Service
@@ -923,7 +923,7 @@ it.live("restores the pinned prompt after compaction without sending it to the s
       const chat = yield* sessions.create({ title: "Compaction prompt" })
       const marker = "SESSION_SYSTEM_MUST_SKIP_COMPACTION"
 
-      const first = yield* prompt.prompt({
+      yield* prompt.prompt({
         sessionID: chat.id,
         agent: "build",
         model: ref,
@@ -934,20 +934,59 @@ it.live("restores the pinned prompt after compaction without sending it to the s
         parts: [{ type: "text", text: "first query" }],
       })
 
+      yield* llm.text("before compaction")
+      yield* prompt.loop({ sessionID: chat.id })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "second query kept verbatim" }],
+      })
+      yield* llm.text("second answer kept verbatim")
+      yield* prompt.loop({ sessionID: chat.id })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "third query kept verbatim" }],
+      })
+      yield* llm.text("third answer kept verbatim")
+      yield* prompt.loop({ sessionID: chat.id })
+      const beforeRequest = (yield* llm.inputs)[2]
+
+      yield* compaction.create({
+        sessionID: chat.id,
+        agent: "compaction",
+        model: ref,
+        auto: false,
+      })
+      const snapshot = yield* sessions.messages({ sessionID: chat.id })
+      const boundary = snapshot.at(-1)!
       yield* llm.text("summary")
       expect(
         yield* compaction.process({
-          parentID: first.info.id,
-          messages: yield* sessions.messages({ sessionID: chat.id }),
+          parentID: boundary.info.id,
+          messages: snapshot,
           sessionID: chat.id,
           auto: false,
         }),
       ).toBe("continue")
-      const compactionRequest = JSON.stringify((yield* llm.inputs)[0])
-      expect(compactionRequest).not.toContain(marker)
-      expect(compactionRequest).toContain("1. Task Overview")
-      expect(compactionRequest).toContain("Write the continuation summary now.")
-      expect(compactionRequest).not.toContain("When constructing the summary")
+      const compactionRequest = (yield* llm.inputs)[3]
+      expect(compactionRequest.model).toBe(ref.modelID)
+      expect(compactionRequest.messages).toBeArray()
+      expect(beforeRequest.messages).toBeArray()
+      if (!Array.isArray(compactionRequest.messages) || !Array.isArray(beforeRequest.messages)) return
+      expect(compactionRequest.messages.slice(0, beforeRequest.messages.length)).toEqual(beforeRequest.messages)
+      expect((compactionRequest.tools as Array<Record<string, unknown>>).map(wireToolName)).toEqual(
+        (beforeRequest.tools as Array<Record<string, unknown>>).map(wireToolName),
+      )
+      expect(compactionRequest.tool_choice).toBe("none")
+      expect(JSON.stringify(compactionRequest)).toContain(marker)
+      expect(JSON.stringify(compactionRequest)).toContain("third answer kept verbatim")
+      expect(JSON.stringify(compactionRequest)).toContain("1. Task Overview")
+      expect(JSON.stringify(compactionRequest)).not.toContain("When constructing the summary")
 
       yield* prompt.prompt({
         sessionID: chat.id,
@@ -959,14 +998,145 @@ it.live("restores the pinned prompt after compaction without sending it to the s
       yield* llm.text("continued")
       yield* prompt.loop({ sessionID: chat.id })
 
-      const request = (yield* llm.inputs)[1]
-      expect(JSON.stringify(request)).toContain(marker)
+      const request = (yield* llm.inputs)[4]
+      const serialized = JSON.stringify(request)
+      expect(serialized).toContain(marker)
+      expect(serialized).toContain("summary")
+      expect(serialized).not.toContain("first query")
+      expect(serialized).not.toContain("second query kept verbatim")
+      expect(serialized).not.toContain("third query kept verbatim")
       expect((request.tools as Array<Record<string, unknown>>).map(wireToolName)).toEqual(["exec"])
       expect((yield* sessions.get(chat.id)).prompt).toEqual({
         system: marker,
         systemMode: "replace-agent",
         harness: "codex",
       })
+    }),
+    {
+      git: true,
+      config: (url) => ({
+        ...providerCfg(url),
+        agent: { compaction: { model: "test/gpt-5-test" } },
+      }),
+    },
+  ),
+)
+
+it.live("provider-overflow compaction uses its configured model and strips media", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const compaction = yield* SessionCompaction.Service
+      const chat = yield* sessions.create({ title: "Overflow compaction" })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [
+          { type: "text", text: "inspect this image" },
+          { type: "file", mime: "image/png", url: "data:image/png;base64,QUFBQQ==", filename: "large.png" },
+        ],
+      })
+      yield* compaction.create({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        auto: true,
+        overflow: true,
+      })
+      const snapshot = yield* sessions.messages({ sessionID: chat.id })
+      yield* llm.text("overflow summary")
+      expect(
+        yield* compaction.process({
+          parentID: snapshot.at(-1)!.info.id,
+          messages: snapshot,
+          sessionID: chat.id,
+          auto: true,
+          overflow: true,
+        }),
+      ).toBe("continue")
+
+      const request = (yield* llm.inputs)[0]
+      expect(request.model).toBe(mcpRef.modelID)
+      expect(request.messages).toBeArray()
+      if (!Array.isArray(request.messages)) return
+      expect(JSON.stringify(request.messages[0])).not.toContain("You have been working on the task described above")
+      expect(JSON.stringify(request.messages.at(-1))).toContain("1. Task Overview")
+      expect(JSON.stringify(request)).toContain("[Attached image/png: large.png]")
+      expect(JSON.stringify(request)).not.toContain("QUFBQQ==")
+    }),
+    {
+      git: true,
+      config: (url) => ({
+        ...providerCfg(url),
+        agent: { compaction: { model: "test/gpt-5-test" } },
+      }),
+    },
+  ),
+)
+
+it.live("empty compaction removes its boundary without calling the model", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const sessions = yield* Session.Service
+      const compaction = yield* SessionCompaction.Service
+      const chat = yield* sessions.create({ title: "Empty compaction" })
+      yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+      const snapshot = yield* sessions.messages({ sessionID: chat.id })
+
+      expect(
+        yield* compaction.process({
+          parentID: snapshot.at(-1)!.info.id,
+          messages: snapshot,
+          sessionID: chat.id,
+          auto: false,
+        }),
+      ).toBe("stop")
+      expect(yield* sessions.messages({ sessionID: chat.id })).toEqual([])
+      expect(yield* llm.calls).toBe(0)
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+it.live("compaction preserves the parent's appended turn context", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const compaction = yield* SessionCompaction.Service
+      const chat = yield* sessions.create({ title: "Compaction turn context" })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        system: "APPENDED_TURN_CONTEXT",
+        systemMode: "append",
+        parts: [{ type: "text", text: "first query" }],
+      })
+      yield* llm.text("first answer")
+      yield* prompt.loop({ sessionID: chat.id })
+      const before = (yield* llm.inputs)[0]
+      yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+      const snapshot = yield* sessions.messages({ sessionID: chat.id })
+      yield* llm.text("summary")
+      expect(
+        yield* compaction.process({
+          parentID: snapshot.at(-1)!.info.id,
+          messages: snapshot,
+          sessionID: chat.id,
+          auto: false,
+        }),
+      ).toBe("continue")
+
+      const compacting = (yield* llm.inputs)[1]
+      expect(compacting.messages).toBeArray()
+      expect(before.messages).toBeArray()
+      if (!Array.isArray(compacting.messages) || !Array.isArray(before.messages)) return
+      expect(compacting.messages.slice(0, before.messages.length)).toEqual(before.messages)
     }),
     { git: true, config: providerCfg },
   ),
@@ -981,29 +1151,15 @@ it.live("persists the process-time compaction projection from the real snapshot 
       const providers = yield* ProviderSvc.Service
       const model = yield* providers.getModel(ref.providerID, ref.modelID)
       const chat = yield* sessions.create({ title: "Compaction projection" })
-      const first = yield* prompt.prompt({
+      yield* prompt.prompt({
         sessionID: chat.id,
         agent: "build",
         model: ref,
         noReply: true,
         parts: [{ type: "text", text: "inspect and edit auth" }],
       })
-      const history = yield* sessions.updateMessage({
-        id: MessageID.ascending(),
-        sessionID: chat.id,
-        agentID: "main",
-        role: "assistant" as const,
-        parentID: first.info.id,
-        time: { created: Date.now(), completed: Date.now() },
-        modelID: ref.modelID,
-        providerID: ref.providerID,
-        mode: "build",
-        agent: "build",
-        path: { cwd: dir, root: dir },
-        cost: 0,
-        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        finish: "stop",
-      })
+      yield* llm.text("prepared")
+      const history = yield* prompt.loop({ sessionID: chat.id })
       const authPath = path.join(dir, "src/auth.ts")
       for (const [tool, input, output, metadata] of [
         [
@@ -1017,7 +1173,7 @@ it.live("persists the process-time compaction projection from the real snapshot 
         yield* sessions.updatePart({
           id: PartID.ascending(),
           sessionID: chat.id,
-          messageID: history.id,
+          messageID: history.info.id,
           type: "tool",
           tool,
           callID: `call-${tool}`,

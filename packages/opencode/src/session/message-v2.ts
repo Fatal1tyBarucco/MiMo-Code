@@ -656,7 +656,7 @@ function compactionProjection(messages: WithParts[]) {
   if (tailEndIdx < 0) return messages.slice(boundaryIdx)
 
   const observed = after.slice(0, tailEndIdx + 1)
-  const summary = observed.find((message) => message.info.id === projection.summary_message_id)
+  const summary = after.find((message) => message.info.id === projection.summary_message_id)
   const tailStartIdx = projection.tail_start_id
     ? observed.findIndex((message) => message.info.id === projection.tail_start_id)
     : -1

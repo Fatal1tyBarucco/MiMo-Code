@@ -19,6 +19,7 @@ import { isOverflow as overflow } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
 import path from "path"
+import { SessionPrefixSnapshot } from "./prefix-snapshot"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -356,19 +357,11 @@ export const layer: Layer.Layer<
       }
       const compactionPart = parent.parts.find((part): part is MessageV2.CompactionPart => part.type === "compaction")
 
-      // Truncate history at the previous compaction boundary so a repeat
-      // compaction summarizes [previous summary + messages since], not the full raw
-      // history (which would grow unboundedly and overflow the compaction model).
-      // Only compaction boundaries are used — checkpoint boundaries inject a
-      // lossy rebuild and compaction benefits from seeing the full window since
-      // the last compaction (including any checkpoint rebuild text in between).
-      const boundaryIdx = input.messages.findLastIndex(
-        (m, i) =>
-          i < parentIdx &&
-          m.info.role === "user" &&
-          m.parts.some((p) => p.type === "compaction"),
-      )
-      const scoped = boundaryIdx >= 0 ? input.messages.slice(boundaryIdx) : input.messages
+      // Reuse the effective conversation before this synthetic boundary without
+      // restoring raw history removed by an earlier compaction or checkpoint.
+      const scoped = compactionPart
+        ? [...MessageV2.filterCompacted([...input.messages.slice(0, parentIdx)].reverse()), parent]
+        : input.messages
 
       let messages = scoped
       let replay:
@@ -399,10 +392,42 @@ export const layer: Layer.Layer<
       }
 
       const agent = yield* agents.get("compaction")
-      const model = agent.model
-        ? yield* provider.getModel(agent.model.providerID, agent.model.modelID)
-        : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+      const requestUser = history.findLast(
+        (message): message is MessageV2.WithParts & { info: MessageV2.User } => message.info.role === "user",
+      )
+      if (!requestUser) {
+        log.warn("compaction history has no user message", { sessionID: input.sessionID })
+        yield* session.removeMessage({ sessionID: input.sessionID, messageID: input.parentID })
+        return "stop" as const
+      }
+      const parentAgent = yield* agents.get(requestUser.info.agent)
+      const parentModel = yield* provider.getModel(requestUser.info.model.providerID, requestUser.info.model.modelID)
+      const parentSession = yield* session.get(input.sessionID)
+      const profileKey = SessionPrefixSnapshot.profileKey({
+        providerID: parentModel.providerID,
+        modelID: parentModel.id,
+        agent: parentAgent.name,
+        agentID: requestUser.info.agentID ?? "main",
+        harness: promptConfig.harness,
+        systemMode: promptConfig.systemMode,
+        system: promptConfig.system ?? "",
+        permission: Agent.runtimePermission(parentAgent, parentSession.permission),
+      })
+      const frozen = yield* SessionPrefixSnapshot.get(input.sessionID, profileKey)
+      if (!frozen) {
+        log.warn("compaction prefix snapshot missing", { sessionID: input.sessionID, profileKey })
+      }
+      if (frozen && !frozen.tools) {
+        log.warn("compaction prefix snapshot missing advertised tools", {
+          sessionID: input.sessionID,
+          profileKey,
+        })
+      }
+      const model =
+        input.overflow && agent.model
+          ? yield* provider.getModel(agent.model.providerID, agent.model.modelID)
+          : parentModel
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
@@ -410,10 +435,17 @@ export const layer: Layer.Layer<
         { context: [], prompt: undefined },
       )
       const prompt =
-        compacting.prompt ?? ["Write the continuation summary now.", ...compacting.context].join("\n\n")
+        compacting.prompt ??
+        [agent.prompt, ...compacting.context]
+          .filter((item): item is string => !!item)
+          .join("\n\n")
       const msgs = structuredClone(history)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, { stripMedia: true })
+      const modelMessages = yield* MessageV2.toModelMessagesEffect(
+        msgs,
+        model,
+        input.overflow ? { stripMedia: true } : { collapseCheckpointTail: true },
+      )
       const ctx = yield* InstanceState.context
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
@@ -423,7 +455,7 @@ export const layer: Layer.Layer<
         agentID: input.agentID ?? undefined,
         mode: "compaction",
         agent: "compaction",
-        variant: userMessage.model.variant,
+        variant: requestUser.info.model.variant,
         summary: true,
         path: {
           cwd: ctx.directory,
@@ -448,19 +480,27 @@ export const layer: Layer.Layer<
         sessionID: input.sessionID,
         model,
       })
+      const summaryRequest = {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: prompt }],
+      }
       const result = yield* processor.process({
-        user: userMessage,
-        agent,
+        user: {
+          ...requestUser.info,
+          system: promptConfig.system,
+          systemMode: promptConfig.systemMode,
+          harness: promptConfig.harness,
+        },
+        agent: parentAgent,
+        permission: parentSession.permission,
         sessionID: input.sessionID,
-        tools: {},
+        tools: frozen?.tools ? SessionPrefixSnapshot.restoreTools(frozen.tools) : {},
+        activeTools: frozen?.tools?.map((item) => item.name),
+        toolChoice: "none",
         system: [],
-        messages: [
-          ...modelMessages,
-          {
-            role: "user",
-            content: [{ type: "text", text: prompt }],
-          },
-        ],
+        prebuiltSystem: frozen?.system,
+        messages: [...modelMessages, summaryRequest],
+        mergeTurnContextBeforeLastMessage: true,
         model,
       })
 
@@ -478,7 +518,9 @@ export const layer: Layer.Layer<
         processor.message.error = new MessageV2.ContextOverflowError({
           message: replay
             ? "Conversation history too large to compact - exceeds model context limit"
-            : "Session too large to compact - context exceeds model limit even after stripping media",
+            : input.overflow
+              ? "Session too large to compact - context exceeds model limit even after stripping media"
+              : "Session too large to compact - context exceeds model limit at the message boundary",
         }).toObject()
         processor.message.finish = "error"
         yield* session.updateMessage(processor.message)
@@ -500,7 +542,7 @@ export const layer: Layer.Layer<
         const arrived = current.slice(snapshotLen).filter((message) => message.info.id !== msg.id)
         const tail = yield* buildTail({
           messages: arrived,
-          model: yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID),
+          model: parentModel,
         })
         const summary = MessageV2.parts(msg.id)
           .filter((part): part is MessageV2.TextPart => part.type === "text")
@@ -513,13 +555,7 @@ export const layer: Layer.Layer<
             version: 1,
             summary_message_id: msg.id,
             summary: buildSummaryMessage(summary, trigger, tail.length > 0),
-            manifest: buildFileManifest(
-              scoped.slice(
-                0,
-                scoped.findIndex((message) => message.info.id === input.parentID),
-              ),
-              { worktree: ctx.worktree },
-            ),
+            manifest: buildFileManifest(history, { worktree: ctx.worktree }),
             trigger,
             tail_start_id: tail.at(0)?.info.id,
             tail_end_id: arrived.at(-1)?.info.id,
