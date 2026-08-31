@@ -982,7 +982,8 @@ it.live("uses the frozen system and appends the compaction prompt to the existin
       expect((compactionRequest.tools as Array<Record<string, unknown>>).map(wireToolName)).toEqual(
         (beforeRequest.tools as Array<Record<string, unknown>>).map(wireToolName),
       )
-      expect(compactionRequest.tool_choice).toBe("none")
+      expect(compactionRequest.tools).toEqual(beforeRequest.tools)
+      expect(compactionRequest.tool_choice).toBe(beforeRequest.tool_choice)
       expect(JSON.stringify(compactionRequest)).toContain(marker)
       expect(JSON.stringify(compactionRequest)).toContain("third answer kept verbatim")
       expect(JSON.stringify(compactionRequest)).toContain("1. Task Overview")

@@ -496,7 +496,7 @@ export const layer: Layer.Layer<
         sessionID: input.sessionID,
         tools: frozen?.tools ? SessionPrefixSnapshot.restoreTools(frozen.tools) : {},
         activeTools: frozen?.tools?.map((item) => item.name),
-        toolChoice: "none",
+        toolChoice: "auto",
         system: [],
         prebuiltSystem: frozen?.system,
         messages: [...modelMessages, summaryRequest],
