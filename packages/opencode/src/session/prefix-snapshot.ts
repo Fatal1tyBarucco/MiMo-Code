@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto"
-import type { Tool as AITool } from "ai"
+import { jsonSchema, tool, type Tool as AITool } from "ai"
+import { asSchema } from "@ai-sdk/provider-utils"
 import { Effect } from "effect"
 import { and, Database, eq } from "@/storage"
 import type { Permission } from "@/permission"
 import type { MessageID, SessionID } from "./schema"
-import { SessionPrefixSnapshotTable } from "./session.sql"
+import { SessionPrefixSnapshotTable, type SessionPrefixToolSnapshot } from "./session.sql"
 
 export type Info = typeof SessionPrefixSnapshotTable.$inferSelect
 
@@ -55,6 +56,32 @@ export function toolsHash(tools: Record<string, AITool>, activeTools: string[]) 
   )
 }
 
+export async function snapshotTools(tools: Record<string, AITool>, activeTools: string[]) {
+  return Promise.all(
+    activeTools.flatMap((name) => {
+      const item = tools[name]
+      if (!item) return []
+      return [
+        Promise.resolve(asSchema(item.inputSchema).jsonSchema).then(
+          (input_schema): SessionPrefixToolSnapshot => ({ name, description: item.description, input_schema }),
+        ),
+      ]
+    }),
+  )
+}
+
+export function restoreTools(items: SessionPrefixToolSnapshot[]) {
+  return Object.fromEntries(
+    items.map((item) => [
+      item.name,
+      tool({
+        description: item.description,
+        inputSchema: jsonSchema(item.input_schema),
+      }),
+    ]),
+  )
+}
+
 export const get = Effect.fn("SessionPrefixSnapshot.get")(function* (sessionID: SessionID, key: string) {
   return yield* Effect.sync(() =>
     Database.use((db) =>
@@ -77,6 +104,7 @@ export const pin = Effect.fn("SessionPrefixSnapshot.pin")(function* (input: {
   profileKey: string
   system: string[]
   toolsHash: string
+  tools: SessionPrefixToolSnapshot[]
   watermarkMessageID: MessageID
 }) {
   const now = Date.now()
@@ -90,6 +118,7 @@ export const pin = Effect.fn("SessionPrefixSnapshot.pin")(function* (input: {
           system: input.system,
           system_hash: systemHash(input.system),
           tools_hash: input.toolsHash,
+          tools: input.tools,
           watermark_message_id: input.watermarkMessageID,
           revision: 1,
           created_at: now,
@@ -109,6 +138,7 @@ export const rotate = Effect.fn("SessionPrefixSnapshot.rotate")(function* (input
   profileKey: string
   system: string[]
   toolsHash: string
+  tools: SessionPrefixToolSnapshot[]
   watermarkMessageID: MessageID
 }) {
   const current = yield* get(input.sessionID, input.profileKey)
@@ -121,6 +151,7 @@ export const rotate = Effect.fn("SessionPrefixSnapshot.rotate")(function* (input
           system: input.system,
           system_hash: systemHash(input.system),
           tools_hash: input.toolsHash,
+          tools: input.tools,
           watermark_message_id: input.watermarkMessageID,
           revision: current.revision + 1,
           updated_at: Date.now(),

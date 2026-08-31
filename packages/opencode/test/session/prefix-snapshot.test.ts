@@ -31,6 +31,7 @@ describe("session prefix snapshot", () => {
             profileKey: key,
             system: ["first"],
             toolsHash: "tools-1",
+            tools: [],
             watermarkMessageID: firstWatermark,
           }),
         )
@@ -47,6 +48,7 @@ describe("session prefix snapshot", () => {
             profileKey: key,
             system: ["ignored"],
             toolsHash: "ignored",
+            tools: [],
             watermarkMessageID: MessageID.ascending(),
           }),
         )
@@ -58,6 +60,7 @@ describe("session prefix snapshot", () => {
             profileKey: key,
             system: ["second"],
             toolsHash: "tools-2",
+            tools: [],
             watermarkMessageID: firstWatermark,
           }),
         )

@@ -6,6 +6,7 @@ import type { Permission } from "../permission"
 import type { ProjectID } from "../project/schema"
 import type { SessionID, MessageID, PartID } from "./schema"
 import type { WorkspaceID } from "../control-plane/schema"
+import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Timestamps } from "../storage/schema.sql"
 
 type PartData = Omit<MessageV2.Part, "id" | "sessionID" | "messageID">
@@ -53,6 +54,12 @@ export const SessionTable = sqliteTable(
   ],
 )
 
+export type SessionPrefixToolSnapshot = {
+  name: string
+  description?: string
+  input_schema: JSONSchema7
+}
+
 export const SessionPrefixSnapshotTable = sqliteTable(
   "session_prefix_snapshot",
   {
@@ -64,6 +71,7 @@ export const SessionPrefixSnapshotTable = sqliteTable(
     system: text({ mode: "json" }).$type<string[]>().notNull(),
     system_hash: text().notNull(),
     tools_hash: text().notNull(),
+    tools: text({ mode: "json" }).$type<SessionPrefixToolSnapshot[]>(),
     watermark_message_id: text().$type<MessageID>().notNull(),
     revision: integer().notNull(),
     created_at: integer().notNull(),

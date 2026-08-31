@@ -4489,6 +4489,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               Effect.provideService(ToolRegistry.Service, registry),
             )
             const currentToolsHash = SessionPrefixSnapshot.toolsHash(tools, activeTools)
+            const currentTools = yield* Effect.promise(() => SessionPrefixSnapshot.snapshotTools(tools, activeTools))
             const resolvedPrefix = yield* Effect.gen(function* () {
               if (!frozen) {
                 const snapshot = yield* SessionPrefixSnapshot.pin({
@@ -4496,11 +4497,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   profileKey: prefixProfileKey,
                   system: initialPrefix.system,
                   toolsHash: currentToolsHash,
+                  tools: currentTools,
                   watermarkMessageID: lastUser.id,
                 })
                 return { prefix: initialPrefix, snapshot }
               }
-              if (frozen.tools_hash === currentToolsHash) return { prefix: initialPrefix, snapshot: frozen }
+              if (frozen.tools && frozen.tools_hash === currentToolsHash) return { prefix: initialPrefix, snapshot: frozen }
               const prefix = yield* buildLLMRequestPrefix({
                 sessionID,
                 agent,
@@ -4518,6 +4520,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 profileKey: prefixProfileKey,
                 system: prefix.system,
                 toolsHash: currentToolsHash,
+                tools: currentTools,
                 watermarkMessageID: lastUser.id,
               })
               return { prefix, snapshot }

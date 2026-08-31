@@ -250,6 +250,8 @@ export type StreamInput = {
   toolChoice?: "auto" | "required" | "none"
   agentID?: string
   mergeTurnContextIntoLastUser?: boolean
+  /** Keep an appended control prompt last while applying provider-specific turn context to the conversation before it. */
+  mergeTurnContextBeforeLastMessage?: boolean
   ephemeral?: boolean
   requestID?: string
 }
@@ -285,6 +287,19 @@ export function appendTurnContext(messages: ModelMessage[], user: MessageV2.User
     return [...messages, ...context]
   }
   return [...messages.slice(0, -1), { ...last, content: last.content + "\n\n" + context[0].content }]
+}
+
+function appendTurnContextBeforeLastMessage(messages: ModelMessage[], user: MessageV2.User) {
+  const tail = messages.at(-1)
+  if (!tail) return appendTurnContext(messages, user, true)
+  const head = messages.slice(0, -1)
+  const userIndex = head.findLastIndex((message) => message.role === "user")
+  if (userIndex < 0) return appendTurnContext(messages, user, true)
+  return [
+    ...appendTurnContext(head.slice(0, userIndex + 1), user, true),
+    ...head.slice(userIndex + 1),
+    tail,
+  ]
 }
 
 export interface Interface {
@@ -530,7 +545,9 @@ const live: Layer.Layer<
       const requestMessages = input.dropAssistantPrefill
         ? ProviderTransform.dropTrailingAssistantPrefill(input.messages)
         : input.messages
-      const requestMessagesWithContext = appendTurnContext(requestMessages, input.user, input.mergeTurnContextIntoLastUser)
+      const requestMessagesWithContext = input.mergeTurnContextBeforeLastMessage
+        ? appendTurnContextBeforeLastMessage(requestMessages, input.user)
+        : appendTurnContext(requestMessages, input.user, input.mergeTurnContextIntoLastUser)
       const messages = isOpenaiOauth
         ? requestMessages
         : isWorkflow
