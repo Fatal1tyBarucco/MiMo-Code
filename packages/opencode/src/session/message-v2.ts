@@ -278,10 +278,32 @@ export const CompactionPart = PartBase.extend({
   type: z.literal("compaction"),
   auto: z.boolean(),
   overflow: z.boolean().optional(),
-  // ID of the user message marking the start of the preserved-tail (verbatim
-  // recent-turns kept after summarization). Optional: when undefined, no tail
-  // was preserved (entire history was summarized).
+  // Legacy pre-compaction tail marker. New projections keep only messages that
+  // arrive while the summary is being generated; see `projection` below.
   tail_start_id: MessageID.zod.optional(),
+  projection: z
+    .object({
+      version: z.literal(1),
+      summary_message_id: MessageID.zod,
+      summary: z.string(),
+      manifest: z.string().optional(),
+      trigger: z.enum(["manual", "automatic", "provider-overflow"]),
+      // The observed compression-time range. `tail_start_id` is the first
+      // whole API round retained inside that range; when omitted, the range was
+      // over budget and is dropped. Messages newer than `tail_end_id` are normal
+      // post-compaction traffic and always stay live.
+      tail_start_id: MessageID.zod.optional(),
+      tail_end_id: MessageID.zod.optional(),
+      compacted_tool_calls: z
+        .array(
+          z.object({
+            call_id: z.string(),
+            tokens: z.number().int().nonnegative(),
+          }),
+        )
+        .optional(),
+    })
+    .optional(),
 }).meta({
   ref: "CompactionPart",
 })
@@ -609,6 +631,67 @@ export const WithParts = z.object({
 })
 export type WithParts = z.infer<typeof WithParts>
 
+// Apply the newest v1 compaction boundary as a context projection while keeping
+// its persisted assistant summary in the internal message stream. API
+// conversion below re-roles that summary as user context; runLoop still sees
+// the real assistant row for terminal-step control flow.
+function compactionProjection(messages: WithParts[]) {
+  const boundaryIdx = messages.findLastIndex(
+    (message) =>
+      message.info.role === "user" &&
+      message.parts.some((part) => part.type === "compaction" && part.projection?.version === 1),
+  )
+  if (boundaryIdx < 0) return messages
+
+  const boundary = messages[boundaryIdx]
+  const projection = boundary.parts.find(
+    (part): part is CompactionPart => part.type === "compaction" && part.projection?.version === 1,
+  )?.projection
+  if (!projection) return messages
+
+  const after = messages.slice(boundaryIdx + 1)
+  if (!projection.tail_end_id) return messages.slice(boundaryIdx)
+
+  const tailEndIdx = after.findIndex((message) => message.info.id === projection.tail_end_id)
+  if (tailEndIdx < 0) return messages.slice(boundaryIdx)
+
+  const observed = after.slice(0, tailEndIdx + 1)
+  const summary = observed.find((message) => message.info.id === projection.summary_message_id)
+  const tailStartIdx = projection.tail_start_id
+    ? observed.findIndex((message) => message.info.id === projection.tail_start_id)
+    : -1
+  const compacted = new Map((projection.compacted_tool_calls ?? []).map((item) => [item.call_id, item.tokens]))
+  const shrink = (message: WithParts): WithParts => ({
+    info: message.info,
+    parts: message.parts.map((part) => {
+      if (part.type !== "tool" || part.state.status !== "completed") return part
+      const tokens = compacted.get(part.callID)
+      if (tokens === undefined) return part
+      return {
+        ...part,
+        state: {
+          ...part.state,
+          output: `[Tool result omitted during compaction: ${tokens} tokens. Re-run "${part.tool}" if this result is needed.]`,
+          providerOutput: undefined,
+          attachments: undefined,
+        },
+      }
+    }),
+  })
+
+  return [
+    boundary,
+    ...(summary ? [summary] : []),
+    ...(tailStartIdx < 0
+      ? []
+      : observed
+          .slice(tailStartIdx)
+          .filter((message) => message.info.id !== projection.summary_message_id)
+          .map(shrink)),
+    ...after.slice(tailEndIdx + 1).filter((message) => message.info.id !== projection.summary_message_id),
+  ]
+}
+
 const Cursor = z.object({
   id: MessageID.zod,
   time: z.number(),
@@ -687,7 +770,16 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
-  const source = options?.collapseCheckpointTail ? collapseCheckpointTail(input) : input
+  const source = compactionProjection(options?.collapseCheckpointTail ? collapseCheckpointTail(input) : input)
+  const projection = source
+    .flatMap((message) =>
+      message.info.role === "user"
+        ? message.parts.flatMap((part) =>
+            part.type === "compaction" && part.projection?.version === 1 ? [part.projection] : [],
+          )
+        : [],
+    )
+    .at(-1)
 
   const toModelOutput = (options: { toolCallId: string; input: unknown; output: unknown }) => {
     const output = options.output
@@ -740,6 +832,18 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   for (const msg of source) {
     if (msg.parts.length === 0) continue
 
+    if (projection && msg.info.id === projection.summary_message_id) {
+      result.push({
+        id: msg.info.id,
+        role: "user",
+        parts: [
+          { type: "text", text: projection.summary },
+          ...(projection.manifest ? [{ type: "text" as const, text: projection.manifest }] : []),
+        ],
+      })
+      continue
+    }
+
     if (msg.info.role === "user") {
       const userMessage: UIMessage = {
         id: msg.info.id,
@@ -781,7 +885,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             text: "Summary of previous conversation from checkpoint files:",
           })
         }
-        if (part.type === "compaction") {
+        if (part.type === "compaction" && !part.projection) {
           userMessage.parts.push({
             type: "text" as const,
             text: "Summary of previous conversation:",
@@ -1104,7 +1208,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     if (msg.info.role === "user" && msg.parts.some((p) => p.type === "checkpoint" || p.type === "compaction")) break
   }
   result.reverse()
-  return result
+  return compactionProjection(result)
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (

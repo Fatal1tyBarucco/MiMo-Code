@@ -256,10 +256,11 @@ const InfoSchema = Schema.Struct({
       }),
       tail_turns: Schema.optional(NonNegativeInt).annotate({
         description:
-          "Number of recent user turns, including their following assistant/tool responses, to keep verbatim during compaction (default: 2)",
+          "Deprecated compatibility setting. Projected compaction now keeps only whole API rounds that arrive while compaction is running.",
       }),
       preserve_recent_tokens: Schema.optional(NonNegativeInt).annotate({
-        description: "Maximum number of tokens from recent turns to preserve verbatim after compaction",
+        description:
+          "Deprecated compatibility setting. Compression-time API rounds now use a fixed 40000-token hard budget.",
       }),
       reserved: Schema.optional(NonNegativeInt).annotate({
         description:

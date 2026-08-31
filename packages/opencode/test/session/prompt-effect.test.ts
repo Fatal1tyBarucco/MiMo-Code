@@ -943,7 +943,11 @@ it.live("restores the pinned prompt after compaction without sending it to the s
           auto: false,
         }),
       ).toBe("continue")
-      expect(JSON.stringify((yield* llm.inputs)[0])).not.toContain(marker)
+      const compactionRequest = JSON.stringify((yield* llm.inputs)[0])
+      expect(compactionRequest).not.toContain(marker)
+      expect(compactionRequest).toContain("1. Task Overview")
+      expect(compactionRequest).toContain("Write the continuation summary now.")
+      expect(compactionRequest).not.toContain("When constructing the summary")
 
       yield* prompt.prompt({
         sessionID: chat.id,
@@ -963,6 +967,161 @@ it.live("restores the pinned prompt after compaction without sending it to the s
         systemMode: "replace-agent",
         harness: "codex",
       })
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+it.live("persists the process-time compaction projection from the real snapshot and arrived tail", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const compaction = yield* SessionCompaction.Service
+      const providers = yield* ProviderSvc.Service
+      const model = yield* providers.getModel(ref.providerID, ref.modelID)
+      const chat = yield* sessions.create({ title: "Compaction projection" })
+      const first = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "inspect and edit auth" }],
+      })
+      const history = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: chat.id,
+        agentID: "main",
+        role: "assistant" as const,
+        parentID: first.info.id,
+        time: { created: Date.now(), completed: Date.now() },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        mode: "build",
+        agent: "build",
+        path: { cwd: dir, root: dir },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        finish: "stop",
+      })
+      const authPath = path.join(dir, "src/auth.ts")
+      for (const [tool, input, output, metadata] of [
+        [
+          "read",
+          { file_path: authPath, offset: 10, limit: 11 },
+          "10: before\n20: after\n\n(Showing lines 10-20 of 100)",
+          { truncated: true },
+        ],
+        ["edit", { file_path: authPath, old_string: "before", new_string: "after" }, "ok", {}],
+      ] as const) {
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: history.id,
+          type: "tool",
+          tool,
+          callID: `call-${tool}`,
+          state: {
+            status: "completed",
+            input,
+            output,
+            title: tool,
+            metadata,
+            time: { start: Date.now(), end: Date.now() },
+          },
+        })
+      }
+
+      yield* compaction.create({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        auto: false,
+        agentID: "main",
+      })
+      const snapshot = yield* sessions.messages({ sessionID: chat.id, agentID: "main" })
+      const boundary = snapshot.at(-1)!
+      const release = defer<void>()
+      yield* llm.hold("PROCESS_SUMMARY", release.promise)
+      const processing = yield* compaction
+        .process({
+          parentID: boundary.info.id,
+          messages: snapshot,
+          sessionID: chat.id,
+          auto: false,
+          agentID: "main",
+        })
+        .pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      const tailUser = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: chat.id,
+        agentID: "main",
+        role: "user" as const,
+        time: { created: Date.now() },
+        agent: "build",
+        model: ref,
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: tailUser.id,
+        type: "text",
+        text: "arrived during compaction",
+      })
+      const tailAssistant = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: chat.id,
+        agentID: "main",
+        role: "assistant" as const,
+        parentID: tailUser.id,
+        time: { created: Date.now(), completed: Date.now() },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        mode: "build",
+        agent: "build",
+        path: { cwd: dir, root: dir },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        finish: "stop",
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: tailAssistant.id,
+        type: "tool",
+        tool: "read",
+        callID: "call-large-tail",
+        state: {
+          status: "completed",
+          input: { file_path: path.join(dir, "large.log") },
+          output: "x".repeat(40_000),
+          title: "read",
+          metadata: {},
+          time: { start: Date.now(), end: Date.now() },
+        },
+      })
+
+      release.resolve(undefined)
+      expect(yield* Fiber.join(processing)).toBe("continue")
+
+      const messages = yield* sessions.messages({ sessionID: chat.id, agentID: "main" })
+      const part = messages
+        .flatMap((message) => message.parts)
+        .find((part): part is MessageV2.CompactionPart => part.type === "compaction")!
+      expect(part.projection?.tail_start_id).toBe(tailUser.id)
+      expect(part.projection?.tail_end_id).toBe(tailAssistant.id)
+      expect(part.projection?.compacted_tool_calls).toEqual([{ call_id: "call-large-tail", tokens: 10_000 }])
+      expect(part.projection?.manifest).toContain("src/auth.ts (read: lines 10-20, then edited)")
+      expect(part.projection?.summary).toContain("PROCESS_SUMMARY")
+
+      const modelMessages = JSON.stringify(
+        yield* MessageV2.toModelMessagesEffect(MessageV2.filterCompacted([...messages].reverse()), model),
+      )
+      expect(modelMessages.match(/PROCESS_SUMMARY/g)).toHaveLength(1)
+      expect(modelMessages).toContain("arrived during compaction")
+      expect(modelMessages).toContain("Tool result omitted during compaction: 10000 tokens")
     }),
     { git: true, config: providerCfg },
   ),
